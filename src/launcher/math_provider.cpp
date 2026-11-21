@@ -23,12 +23,31 @@ namespace {
   constexpr Inotify::WatchMask kDefinitionsWatchMask =
       IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF;
 
-  // Cheap pre-filter: the provider participates in global search on every keystroke,
-  // so reject anything without a digit to avoid evaluating plain search text
-  // (e.g. "firefox"). Letters/spaces are kept so unit and currency conversions
-  // like "10 cm to in" or "5 USD to EUR" still reach libqalculate.
+  // Pre-filter: matches arithmetic, math functions, constants, base conversions,
+  // and universal unit/currency conversions (e.g. "10 cm to in", "5 USD to EUR", "c to f", "pi * 2").
   bool looksLikeMath(std::string_view text) {
-    return std::ranges::any_of(text, [&](char c) { return c >= '0' && c <= '9'; });
+    if (std::ranges::any_of(text, [&](char c) { return c >= '0' && c <= '9'; })) {
+      return true;
+    }
+    constexpr std::string_view kMathSymbols = "+-*/^%()=!~";
+    if (std::ranges::any_of(text, [&](char c) { return kMathSymbols.find(c) != std::string_view::npos; })) {
+      return true;
+    }
+    if (text.contains(" to ") || text.contains(" in ") || text.contains(" into ")) {
+      return true;
+    }
+    if (text.contains('$') || text.contains("€") || text.contains("£") || text.contains("¥") || text.contains("₹")) {
+      return true;
+    }
+    constexpr std::array<std::string_view, 16> kMathWords = {"pi",  "sin", "cos", "tan",   "sqrt", "cbrt",
+                                                             "log", "ln",  "abs", "exp",   "rad",  "deg",
+                                                             "hex", "bin", "oct", "c to f"};
+    for (std::string_view word : kMathWords) {
+      if (text.contains(word)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   std::string trimmed(std::string_view text) {
@@ -205,9 +224,9 @@ std::vector<LauncherResult> MathProvider::evaluate(std::string_view text) const 
   LauncherResult r;
   r.id = "math";
   r.title = "= " + output;
-  r.subtitle = std::string(text);
+  r.subtitle = "Calculator: " + localized;
   r.glyphName = "calculator";
-  r.score = 10000;
+  r.score = 100000.0;
 
   return {std::move(r)};
 }

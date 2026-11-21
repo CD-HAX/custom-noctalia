@@ -1,9 +1,7 @@
 #include "ui/controls/image.h"
 
-#include "core/log.h"
 #include "render/core/async_texture_cache.h"
 #include "render/core/image_decoder.h"
-#include "render/core/image_effects.h"
 #include "render/core/renderer.h"
 #include "render/core/texture_manager.h"
 #include "render/scene/image_node.h"
@@ -18,7 +16,93 @@
 
 namespace {
 
-  constexpr Logger kLog("image");
+  int renderTargetSize(const Renderer& renderer, int targetSize) {
+    if (targetSize <= 0) {
+      return 0;
+    }
+
+    const float scale = std::max(1.0F, renderer.renderScale());
+    return std::max(1, static_cast<int>(std::round(static_cast<float>(targetSize) * scale)));
+  }
+
+  void boxBlurHorizontal(
+      const std::vector<std::uint8_t>& source, std::vector<std::uint8_t>& destination, int width, int height, int radius
+  ) {
+    const auto diameter = static_cast<std::uint32_t>(radius * 2 + 1);
+    for (int y = 0; y < height; ++y) {
+      for (int channel = 0; channel < 4; ++channel) {
+        std::uint32_t sum = 0;
+        for (int offset = -radius; offset <= radius; ++offset) {
+          const int sampleX = std::clamp(offset, 0, width - 1);
+          const auto index =
+              (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(sampleX)) * 4U
+              + static_cast<std::size_t>(channel);
+          sum += source[index];
+        }
+        for (int x = 0; x < width; ++x) {
+          const auto index =
+              (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4U
+              + static_cast<std::size_t>(channel);
+          destination[index] = static_cast<std::uint8_t>((sum + diameter / 2U) / diameter);
+          const int removeX = std::clamp(x - radius, 0, width - 1);
+          const int addX = std::clamp(x + radius + 1, 0, width - 1);
+          const auto removeIndex =
+              (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(removeX)) * 4U
+              + static_cast<std::size_t>(channel);
+          const auto addIndex =
+              (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(addX)) * 4U
+              + static_cast<std::size_t>(channel);
+          sum = sum - source[removeIndex] + source[addIndex];
+        }
+      }
+    }
+  }
+
+  void boxBlurVertical(
+      const std::vector<std::uint8_t>& source, std::vector<std::uint8_t>& destination, int width, int height, int radius
+  ) {
+    const auto diameter = static_cast<std::uint32_t>(radius * 2 + 1);
+    for (int x = 0; x < width; ++x) {
+      for (int channel = 0; channel < 4; ++channel) {
+        std::uint32_t sum = 0;
+        for (int offset = -radius; offset <= radius; ++offset) {
+          const int sampleY = std::clamp(offset, 0, height - 1);
+          const auto index =
+              (static_cast<std::size_t>(sampleY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4U
+              + static_cast<std::size_t>(channel);
+          sum += source[index];
+        }
+        for (int y = 0; y < height; ++y) {
+          const auto index =
+              (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4U
+              + static_cast<std::size_t>(channel);
+          destination[index] = static_cast<std::uint8_t>((sum + diameter / 2U) / diameter);
+          const int removeY = std::clamp(y - radius, 0, height - 1);
+          const int addY = std::clamp(y + radius + 1, 0, height - 1);
+          const auto removeIndex =
+              (static_cast<std::size_t>(removeY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4U
+              + static_cast<std::size_t>(channel);
+          const auto addIndex =
+              (static_cast<std::size_t>(addY) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4U
+              + static_cast<std::size_t>(channel);
+          sum = sum - source[removeIndex] + source[addIndex];
+        }
+      }
+    }
+  }
+
+  void blurRgba(std::vector<std::uint8_t>& rgba, int width, int height, int radius) {
+    if (rgba.empty() || width <= 0 || height <= 0 || radius <= 0) {
+      return;
+    }
+    const int passRadius = std::max(1, radius / 2);
+    std::vector<std::uint8_t> scratch(rgba.size());
+    constexpr int kBlurPasses = 3;
+    for (int pass = 0; pass < kBlurPasses; ++pass) {
+      boxBlurHorizontal(rgba, scratch, width, height, passRadius);
+      boxBlurVertical(scratch, rgba, width, height, passRadius);
+    }
+  }
 
   std::vector<std::uint8_t>
   pixmapToRgba(const std::uint8_t* data, std::size_t size, int width, int height, int stride, PixmapFormat format) {
@@ -89,18 +173,6 @@ namespace {
     return rgba;
   }
 
-  ImageFitMode toFitMode(ImageFit fit) {
-    switch (fit) {
-    case ImageFit::Cover:
-      return ImageFitMode::Cover;
-    case ImageFit::Contain:
-      return ImageFitMode::Contain;
-    case ImageFit::Stretch:
-      return ImageFitMode::Stretch;
-    }
-    return ImageFitMode::Stretch;
-  }
-
 } // namespace
 
 Image::Image() {
@@ -112,8 +184,10 @@ Image::Image() {
 }
 
 Image::~Image() {
-  releaseFileRequests();
-  releaseOwnedTexture();
+  clearAsyncSource();
+  if (m_ownsTexture && m_texture.id != 0 && m_renderer != nullptr) {
+    m_renderer->textureManager().unload(m_texture);
+  }
 }
 
 // Retained binding used by teardown and deferred reloads. Callers must hand in
@@ -129,7 +203,9 @@ void Image::setRadius(float radius) {
     return;
   }
   m_radius = radius;
-  m_image->setRadius(radius);
+  if (m_image != nullptr) {
+    m_image->setRadius(radius);
+  }
   markPaintDirty();
 }
 
@@ -147,11 +223,29 @@ void Image::applyStyleRadius() {
     return;
   }
   m_radius = Style::scaledRadius(*m_styleRadius, m_styleRadiusScale);
-  m_image->setRadius(m_radius);
+  if (m_image != nullptr) {
+    m_image->setRadius(m_radius);
+  }
   markPaintDirty();
 }
 
-void Image::setScrim(const ImageScrim& scrim) { m_image->setScrim(scrim); }
+int Image::textureTargetSize(const Renderer& renderer, int requestedTargetSize) const {
+  if (!m_pixelAligned || requestedTargetSize <= 0) {
+    return renderTargetSize(renderer, requestedTargetSize);
+  }
+  const float frameSide = std::max(width(), height()) - m_padding * 2.0F;
+  if (frameSide <= 0.0F) {
+    return renderTargetSize(renderer, requestedTargetSize);
+  }
+  // The padded frame updateLayout() snaps to whole buffer pixels.
+  return std::max(1, static_cast<int>(std::round(frameSide * renderer.renderScale())));
+}
+
+void Image::setScrim(const ImageScrim& scrim) {
+  if (m_image != nullptr) {
+    m_image->setScrim(scrim);
+  }
+}
 
 void Image::setBorder(const ColorSpec& color, float width) {
   m_border = color;
@@ -162,18 +256,20 @@ void Image::setBorder(const ColorSpec& color, float width) {
 void Image::setBorder(const Color& color, float width) { setBorder(fixedColorSpec(color), width); }
 
 void Image::setTint(const Color& tint) {
-  m_image->setTint(tint);
-  m_image->setMonochromeTint(false);
-  m_image->setAlphaMaskTint(false);
-  m_foregroundTint = std::nullopt;
-  if (m_appIconColorizeTint.has_value()) {
-    m_appIconColorizeTint = std::nullopt;
-    rebakeRawSource();
-    syncFileRequest();
+  if (m_image != nullptr) {
+    m_image->setTint(tint);
+    m_image->setMonochromeTint(false);
+    m_image->setAlphaMaskTint(false);
   }
+  m_appIconColorizeTint = std::nullopt;
+  m_foregroundTint = std::nullopt;
 }
 
-void Image::setSaturation(float saturation) { m_image->setSaturation(saturation); }
+void Image::setSaturation(float saturation) {
+  if (m_image != nullptr) {
+    m_image->setSaturation(saturation);
+  }
+}
 
 void Image::setAppIconColorization(std::optional<ColorSpec> tint) {
   if (m_appIconColorizeTint == tint) {
@@ -201,7 +297,6 @@ void Image::setFit(ImageFit fit) {
   }
   m_fit = fit;
   updateLayout();
-  syncFileRequest();
 }
 
 void Image::setPadding(float padding) {
@@ -212,40 +307,216 @@ void Image::setPadding(float padding) {
   updateLayout();
 }
 
+void Image::setPixelAligned(bool pixelAligned) {
+  if (m_pixelAligned == pixelAligned) {
+    return;
+  }
+  m_pixelAligned = pixelAligned;
+  m_image->setPixelSnap(pixelAligned);
+  updateLayout();
+}
+
 void Image::setAsyncReadyCallback(AsyncReadyCallback callback) { m_asyncReadyCallback = std::move(callback); }
 
-bool Image::setSourceFile(Renderer& renderer, const std::string& path, const ImageSourceOptions& options) {
+bool Image::setSourceFile(Renderer& renderer, const std::string& path, int targetSize, bool mipmap) {
+  return setSourceFileImpl(renderer, path, targetSize, mipmap, false, 0);
+}
+
+bool Image::setSourceFile(
+    Renderer& renderer, const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop
+) {
+  return setSourceFileImpl(renderer, path, targetSize, mipmap, centerSquareCrop, 0);
+}
+
+bool Image::setSourceFileBlurred(
+    Renderer& renderer, const std::string& path, int targetSize, int blurRadius, bool mipmap
+) {
+  return setSourceFileImpl(renderer, path, targetSize, mipmap, false, std::max(0, blurRadius));
+}
+
+bool Image::setSourceFileImpl(
+    Renderer& renderer, const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop, int blurRadius
+) {
+  const int requestedTargetSize = std::max(0, targetSize);
+  const int requestedBlurRadius = std::max(0, blurRadius);
+  const int textureTargetSize = this->textureTargetSize(renderer, requestedTargetSize);
+  if (m_ownsTexture
+      && path == m_sourcePath
+      && m_sourceRequestedTargetSize == requestedTargetSize
+      && m_sourceTargetSize == textureTargetSize
+      && m_sourceMipmap == mipmap
+      && m_sourceCenterSquareCrop == centerSquareCrop
+      && m_sourceBlurRadius == requestedBlurRadius
+      && m_texture.id != 0) {
+    return true;
+  }
+
+  clear(renderer);
   bindRenderer(renderer);
+
+  if (path.empty()) {
+    return false;
+  }
+
+  auto loaded = loadImageFile(path, textureTargetSize, centerSquareCrop);
+  if (!loaded) {
+    m_sourcePath.clear();
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+    }
+    return false;
+  }
+
+  const int textureBlurRadius = renderTargetSize(renderer, requestedBlurRadius);
+  blurRgba(loaded->rgba, loaded->width, loaded->height, textureBlurRadius);
+  if (!commitColorizedRgba(renderer, loaded->rgba.data(), loaded->width, loaded->height, mipmap)) {
+    m_sourcePath.clear();
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+    }
+    return false;
+  }
+  m_texture.sourceWidth = loaded->sourceWidth;
+  m_texture.sourceHeight = loaded->sourceHeight;
+
+  m_sourcePath = path;
+  m_sourceRequestedTargetSize = requestedTargetSize;
+  m_sourceTargetSize = textureTargetSize;
+  m_sourceMipmap = mipmap;
+  m_sourceCenterSquareCrop = centerSquareCrop;
+  m_sourceBlurRadius = requestedBlurRadius;
+  clearOwnedRgbaSource();
+  updateLayout();
+  return true;
+}
+
+bool Image::reloadSourceFile(
+    Renderer& renderer, const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop
+) {
+  bindRenderer(renderer);
+
+  if (path.empty()) {
+    return false;
+  }
+
+  const int requestedTargetSize = std::max(0, targetSize);
+  const int textureTargetSize = this->textureTargetSize(renderer, requestedTargetSize);
+  auto loaded = loadImageFile(path, textureTargetSize, centerSquareCrop);
+  if (!loaded) {
+    return false;
+  }
+
+  const int textureBlurRadius = renderTargetSize(renderer, m_sourceBlurRadius);
+  blurRgba(loaded->rgba, loaded->width, loaded->height, textureBlurRadius);
+
+  clearAsyncSource();
+  if (!commitColorizedRgba(renderer, loaded->rgba.data(), loaded->width, loaded->height, mipmap)) {
+    return false;
+  }
+  m_texture.sourceWidth = loaded->sourceWidth;
+  m_texture.sourceHeight = loaded->sourceHeight;
+
+  m_sourcePath = path;
+  m_sourceRequestedTargetSize = requestedTargetSize;
+  m_sourceTargetSize = textureTargetSize;
+  m_sourceMipmap = mipmap;
+  m_sourceCenterSquareCrop = centerSquareCrop;
+  clearOwnedRgbaSource();
+  if (m_image != nullptr) {
+    m_image->setTextureId(m_texture.id);
+  }
+  updateLayout();
+  return true;
+}
+
+bool Image::setSourceFileAsync(
+    Renderer& renderer, AsyncTextureCache& cache, const std::string& path, int targetSize, bool mipmap,
+    bool centerSquareCrop
+) {
+  bindRenderer(renderer);
+
+  const int requestedTargetSize = std::max(0, targetSize);
+  const int normalizedTargetSize = textureTargetSize(renderer, requestedTargetSize);
   if (path.empty()) {
     clear(renderer);
     return false;
   }
 
-  AsyncTextureCache* cache = renderer.asyncTextureCache();
-  if (cache == nullptr) {
-    kLog.warn("no async texture cache bound to the renderer; cannot load {}", path);
+  const bool sameRequest = m_asyncTextureCache == &cache
+      && m_asyncSourcePath == path
+      && m_asyncRequestedTargetSize == requestedTargetSize
+      && m_asyncTargetSize == normalizedTargetSize
+      && m_asyncMipmap == mipmap
+      && m_asyncCenterSquareCrop == centerSquareCrop;
+  if (sameRequest && m_texture.id != 0) {
+    if (m_appIconColorizeTint.has_value() && !m_ownsTexture) {
+      presentAsyncTexture(m_texture);
+    }
+    return hasImage();
+  }
+
+  if (!sameRequest) {
     clear(renderer);
-    m_loadState = ImageLoadState::Failed;
+    m_asyncTextureCache = &cache;
+    m_asyncSourcePath = path;
+    m_asyncRequestedTargetSize = requestedTargetSize;
+    m_asyncTargetSize = normalizedTargetSize;
+    m_asyncMipmap = mipmap;
+    m_asyncCenterSquareCrop = centerSquareCrop;
+    m_texture = cache.acquire(path, normalizedTargetSize, mipmap, centerSquareCrop);
+    if (m_texture.id == 0) {
+      subscribeAsyncReady();
+    }
+  } else if (m_texture.id == 0) {
+    m_texture = cache.peek(path, normalizedTargetSize, mipmap, centerSquareCrop);
+    if (m_texture.id != 0) {
+      m_asyncReadySub.disconnect();
+    }
+  }
+
+  if (m_texture.id == 0) {
+    m_sourcePath = path;
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+      m_image->setFrameSize(0.0F, 0.0F);
+    }
     return false;
   }
 
-  if (path != m_filePath || cache != m_cache) {
-    clear(renderer);
-    m_filePath = path;
-    m_cache = cache;
-  }
-  m_fileOptions = options;
-  syncFileRequest();
-  return m_loadState == ImageLoadState::Ready;
+  presentAsyncTexture(m_texture);
+  return hasImage();
 }
 
-void Image::reloadSourceFile(Renderer& renderer) {
+bool Image::setSourceBytes(Renderer& renderer, const std::uint8_t* data, std::size_t size, bool mipmap) {
+  clear(renderer);
   bindRenderer(renderer);
-  if (m_filePath.empty() || m_cache == nullptr) {
-    return;
+
+  if (data == nullptr || size == 0) {
+    return false;
   }
-  m_cache->invalidatePath(m_filePath);
-  syncFileRequest();
+
+  auto decoded = decodeRasterImage(data, size);
+  if (!decoded) {
+    m_sourcePath.clear();
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+    }
+    return false;
+  }
+
+  if (!commitColorizedRgba(renderer, decoded->pixels.data(), decoded->width, decoded->height, mipmap)) {
+    m_sourcePath.clear();
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+    }
+    return false;
+  }
+
+  m_sourcePath.clear();
+  m_sourceMipmap = mipmap;
+  storeOwnedRgbaSource(decoded->pixels.data(), decoded->width, decoded->height);
+  updateLayout();
+  return true;
 }
 
 bool Image::setSourceRaw(
@@ -253,28 +524,38 @@ bool Image::setSourceRaw(
     PixmapFormat format, bool mipmap
 ) {
   clear(renderer);
+  bindRenderer(renderer);
 
   if (data == nullptr || size == 0 || width <= 0 || height <= 0) {
     return false;
   }
 
   auto rgba = pixmapToRgba(data, size, width, height, stride, format);
-  if (rgba.empty() || !commitRawRgba(renderer, rgba.data(), width, height, mipmap)) {
-    m_loadState = ImageLoadState::Failed;
+  if (rgba.empty()) {
+    m_sourcePath.clear();
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+    }
     return false;
   }
 
-  m_rawRgba = std::move(rgba);
-  m_rawWidth = width;
-  m_rawHeight = height;
-  m_rawMipmap = mipmap;
-  m_loadState = ImageLoadState::Ready;
+  if (!commitColorizedRgba(renderer, rgba.data(), width, height, mipmap)) {
+    m_sourcePath.clear();
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+    }
+    return false;
+  }
+
+  m_sourcePath.clear();
+  m_sourceMipmap = mipmap;
+  storeOwnedRgbaSource(rgba.data(), width, height);
+  updateLayout();
   return true;
 }
 
 void Image::setExternalTexture(Renderer& renderer, TextureHandle handle) {
   if (!m_ownsTexture
-      && m_filePath.empty()
       && m_texture.id == handle.id
       && m_texture.width == handle.width
       && m_texture.height == handle.height) {
@@ -282,203 +563,76 @@ void Image::setExternalTexture(Renderer& renderer, TextureHandle handle) {
   }
 
   bindRenderer(renderer);
-  releaseFileRequests();
-  m_filePath.clear();
-  m_cache = nullptr;
-  m_rawRgba.clear();
-  setTexture(handle, false);
-  m_loadState = handle.id != 0 ? ImageLoadState::Ready : ImageLoadState::Empty;
+  clearAsyncSource();
+  clearColorizationSource();
+  if (m_ownsTexture && m_texture.id != 0) {
+    renderer.textureManager().unload(m_texture);
+  }
+
+  m_texture = handle;
+  m_ownsTexture = false;
+  m_sourcePath.clear();
+  m_sourceRequestedTargetSize = 0;
+  m_sourceTargetSize = 0;
+  m_sourceMipmap = false;
+  m_sourceBlurRadius = 0;
+  clearOwnedRgbaSource();
+  if (m_image != nullptr) {
+    m_image->setTextureId(m_texture.id);
+  }
+  updateLayout();
 }
 
 void Image::clear(Renderer& renderer) {
   bindRenderer(renderer);
-  releaseFileRequests();
-  releaseOwnedTexture();
-  m_filePath.clear();
-  m_cache = nullptr;
-  m_fileOptions = {};
-  m_rawRgba.clear();
-  m_rawWidth = 0;
-  m_rawHeight = 0;
+  clearAsyncSource();
+  if (m_ownsTexture && m_texture.id != 0) {
+    renderer.textureManager().unload(m_texture);
+  }
   m_texture = {};
-  m_loadState = ImageLoadState::Empty;
-  m_image->setTextureId({});
-  m_image->setFrameSize(0.0F, 0.0F);
-}
-
-void Image::setTexture(TextureHandle handle, bool owned) {
-  if (m_ownsTexture && m_texture.id != 0 && m_texture.id != handle.id && m_renderer != nullptr) {
-    m_renderer->textureManager().unload(m_texture);
-  }
-  m_texture = handle;
-  m_ownsTexture = owned && handle.id != 0;
-  m_image->setTextureId(m_texture.id);
-  updateLayout();
-  markPaintDirty();
-}
-
-void Image::releaseOwnedTexture() {
-  if (m_ownsTexture && m_texture.id != 0 && m_renderer != nullptr) {
-    m_renderer->textureManager().unload(m_texture);
-    m_texture = {};
-  }
   m_ownsTexture = false;
+  m_sourcePath.clear();
+  m_sourceRequestedTargetSize = 0;
+  m_sourceTargetSize = 0;
+  m_sourceMipmap = false;
+  m_sourceCenterSquareCrop = false;
+  m_sourceBlurRadius = 0;
+  clearOwnedRgbaSource();
+  clearColorizationSource();
+  if (m_image != nullptr) {
+    m_image->setTextureId({});
+    m_image->setFrameSize(0.0F, 0.0F);
+  }
 }
 
-ImageDecodeRequest Image::buildDecodeRequest(const Renderer& renderer) const {
-  ImageDecodeRequest request{
-      .path = m_filePath,
-      .targetSize = decodeTargetSize(renderer),
-      .mipmap = m_fileOptions.mipmap,
-      .centerSquareCrop = m_fileOptions.centerSquareCrop,
-      .symbolicColor = m_fileOptions.symbolicColor,
-      .generation = m_cache->generation(m_filePath),
-  };
-  if (m_fileOptions.blurRadius > 0.0F) {
-    const float scale = std::max(1.0F, renderer.renderScale());
-    request.blurRadius = std::max(1, static_cast<int>(std::round(m_fileOptions.blurRadius * scale)));
+void Image::clearAsyncSource() {
+  m_asyncReadySub.disconnect();
+  if (m_asyncTextureCache != nullptr && !m_asyncSourcePath.empty()) {
+    m_asyncTextureCache->release(m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop);
   }
-  if (m_appIconColorizeTint.has_value()) {
-    request.appIconTint = resolveAppIconColorization(*m_appIconColorizeTint).tint;
-    request.appIconLightTheme = isResolvedLightTheme();
-  }
-  return request;
+  m_asyncTextureCache = nullptr;
+  m_asyncSourcePath.clear();
+  m_asyncRequestedTargetSize = 0;
+  m_asyncTargetSize = 0;
+  m_asyncMipmap = false;
+  m_asyncCenterSquareCrop = false;
 }
 
-int Image::decodeTargetSize(const Renderer& renderer) const {
-  if (m_fileOptions.targetSize <= 0) {
-    return 0;
-  }
-
-  const float scale = renderer.renderScale() > 0.0F ? renderer.renderScale() : 1.0F;
-  const float oversample = std::max(1.0F, m_fileOptions.oversample);
-  const float paddedWidth = width() - m_padding * 2.0F;
-  const float paddedHeight = height() - m_padding * 2.0F;
-  if (paddedWidth <= 0.0F || paddedHeight <= 0.0F) {
-    // Not laid out yet: the caller's display size stands in for the frame.
-    return std::max(1, static_cast<int>(std::round(static_cast<float>(m_fileOptions.targetSize) * scale * oversample)));
-  }
-
-  // The frame updateLayout() snaps to whole buffer pixels.
-  const float frameWidth = std::round(paddedWidth * scale);
-  const float frameHeight = std::round(paddedHeight * scale);
-  float side = std::max(frameWidth, frameHeight);
-  if (m_fit != ImageFit::Stretch
-      && m_texture.valid()
-      && !m_ownsTexture
-      && m_texture.sourceWidth > 0
-      && m_texture.sourceHeight > 0) {
-    // Once the source aspect is known, bound the long edge so the fitted texture matches the frame exactly.
-    auto sourceWidth = static_cast<float>(m_texture.sourceWidth);
-    auto sourceHeight = static_cast<float>(m_texture.sourceHeight);
-    if (m_fileOptions.centerSquareCrop) {
-      sourceWidth = sourceHeight = std::min(sourceWidth, sourceHeight);
-    }
-    const float fitScale = m_fit == ImageFit::Cover ? std::max(frameWidth / sourceWidth, frameHeight / sourceHeight)
-                                                    : std::min(frameWidth / sourceWidth, frameHeight / sourceHeight);
-    side = std::max(sourceWidth, sourceHeight) * fitScale;
-  }
-  return std::max(1, static_cast<int>(std::round(side * oversample)));
-}
-
-void Image::syncFileRequest() {
-  if (m_filePath.empty() || m_cache == nullptr || m_renderer == nullptr) {
+void Image::storeOwnedRgbaSource(const std::uint8_t* rgba, int width, int height) {
+  if (rgba == nullptr || width <= 0 || height <= 0) {
+    clearOwnedRgbaSource();
     return;
   }
-
-  ImageDecodeRequest request = buildDecodeRequest(*m_renderer);
-  if (m_request.has_value() && *m_request == request) {
-    return;
-  }
-
-  m_readySub.disconnect();
-  if (m_request.has_value()) {
-    // Keep the shown texture on screen until the new decode lands; a pending request was never shown.
-    if (m_loadState == ImageLoadState::Ready && !m_retiringRequest.has_value()) {
-      m_retiringRequest = std::move(m_request);
-    } else {
-      m_cache->release(*m_request);
-    }
-  }
-
-  m_request = std::move(request);
-  const TextureHandle handle = m_cache->acquire(*m_request);
-  if (handle.id != 0 || m_cache->failed(*m_request)) {
-    // Settled synchronously: the caller sees the result directly, so no ready callback.
-    const AsyncReadyCallback callback = std::move(m_asyncReadyCallback);
-    m_asyncReadyCallback = nullptr;
-    handleDecodeReady(handle);
-    m_asyncReadyCallback = callback;
-    return;
-  }
-
-  m_loadState = ImageLoadState::Loading;
-  m_readySub = m_cache->subscribeReady(*m_request, [this](TextureHandle ready) { handleDecodeReady(ready); });
+  const auto byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
+  m_ownedSourceRgba.assign(rgba, rgba + byteCount);
+  m_ownedSourceRgbaWidth = width;
+  m_ownedSourceRgbaHeight = height;
 }
 
-void Image::handleDecodeReady(TextureHandle handle) {
-  m_readySub.disconnect();
-  if (handle.id == 0) {
-    setTexture({}, false);
-    m_loadState = ImageLoadState::Failed;
-  } else {
-    setTexture(handle, false);
-    m_loadState = ImageLoadState::Ready;
-  }
-  if (m_retiringRequest.has_value()) {
-    m_cache->release(*m_retiringRequest);
-    m_retiringRequest.reset();
-  }
-  if (m_asyncReadyCallback) {
-    m_asyncReadyCallback();
-  }
-}
-
-void Image::releaseFileRequests() {
-  m_readySub.disconnect();
-  if (m_cache != nullptr) {
-    if (m_request.has_value()) {
-      m_cache->release(*m_request);
-    }
-    if (m_retiringRequest.has_value()) {
-      m_cache->release(*m_retiringRequest);
-    }
-  }
-  m_request.reset();
-  m_retiringRequest.reset();
-  if (!m_ownsTexture) {
-    m_texture = {};
-  }
-}
-
-bool Image::commitRawRgba(Renderer& renderer, const std::uint8_t* rgba, int width, int height, bool mipmap) {
-  bindRenderer(renderer);
-  m_rawBakedTint = m_appIconColorizeTint.has_value()
-      ? std::optional<Color>(resolveAppIconColorization(*m_appIconColorizeTint).tint)
-      : std::nullopt;
-  m_rawBakedLight = isResolvedLightTheme();
-  TextureHandle texture;
-  if (m_rawBakedTint.has_value()) {
-    std::vector<std::uint8_t> baked(
-        rgba, rgba + static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U
-    );
-    image_effects::colorizeAppIcon(baked.data(), width, height, *m_rawBakedTint, m_rawBakedLight);
-    texture = renderer.textureManager().loadFromRgba(baked.data(), width, height, mipmap);
-  } else {
-    texture = renderer.textureManager().loadFromRgba(rgba, width, height, mipmap);
-  }
-  if (texture.id == 0) {
-    return false;
-  }
-  setTexture(texture, true);
-  return true;
-}
-
-void Image::rebakeRawSource() {
-  if (m_renderer == nullptr || m_rawRgba.empty()) {
-    return;
-  }
-  commitRawRgba(*m_renderer, m_rawRgba.data(), m_rawWidth, m_rawHeight, m_rawMipmap);
+void Image::clearOwnedRgbaSource() {
+  m_ownedSourceRgba.clear();
+  m_ownedSourceRgbaWidth = 0;
+  m_ownedSourceRgbaHeight = 0;
 }
 
 void Image::setSize(float width, float height) {
@@ -493,9 +647,54 @@ void Image::setFrameSize(float width, float height) {
 
 void Image::doLayout(Renderer& renderer) {
   bindRenderer(renderer);
-  // The render scale can change between layouts (output moves), so resnap the frame first.
-  updateLayout();
-  syncFileRequest();
+  if (m_pixelAligned) {
+    // The render scale can change between layouts (output moves), so resnap the frame first.
+    updateLayout();
+  }
+  if (m_ownsTexture && !m_sourcePath.empty() && m_sourceRequestedTargetSize > 0) {
+    const int textureTargetSize = this->textureTargetSize(renderer, m_sourceRequestedTargetSize);
+    if (textureTargetSize != m_sourceTargetSize) {
+      auto loaded = loadImageFile(m_sourcePath, textureTargetSize, m_sourceCenterSquareCrop);
+      if (loaded) {
+        const int textureBlurRadius = renderTargetSize(renderer, m_sourceBlurRadius);
+        blurRgba(loaded->rgba, loaded->width, loaded->height, textureBlurRadius);
+        if (commitColorizedRgba(renderer, loaded->rgba.data(), loaded->width, loaded->height, m_sourceMipmap)) {
+          m_sourceTargetSize = textureTargetSize;
+          updateLayout();
+        }
+      }
+    }
+  }
+
+  if (m_asyncTextureCache != nullptr && !m_asyncSourcePath.empty()) {
+    const int textureTargetSize = this->textureTargetSize(renderer, m_asyncRequestedTargetSize);
+    if (textureTargetSize != m_asyncTargetSize) {
+      m_asyncReadySub.disconnect();
+      m_asyncTextureCache->release(m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop);
+      m_texture = {};
+      m_ownsTexture = false;
+      m_asyncTargetSize = textureTargetSize;
+      if (m_image != nullptr) {
+        m_image->setTextureId({});
+        m_image->setFrameSize(0.0F, 0.0F);
+      }
+      m_texture =
+          m_asyncTextureCache->acquire(m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop);
+      if (m_texture.id != 0) {
+        presentAsyncTexture(m_texture);
+      } else {
+        subscribeAsyncReady();
+      }
+    }
+  }
+
+  if (m_texture.id == 0 && m_asyncTextureCache != nullptr && !m_asyncSourcePath.empty()) {
+    const auto handle =
+        m_asyncTextureCache->peek(m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop);
+    if (handle.id != 0) {
+      presentAsyncTexture(handle);
+    }
+  }
 }
 
 void Image::doInvalidateGpuResources(Renderer& renderer) {
@@ -506,69 +705,304 @@ void Image::doInvalidateGpuResources(Renderer& renderer) {
       renderer.textureManager().unload(m_texture);
     }
     m_texture = {};
-    m_ownsTexture = false;
-    m_image->setTextureId({});
-    rebakeRawSource();
+
+    bool reloaded = false;
+    if (m_appIconColorizeTint.has_value() && !m_colorizationSource.empty()) {
+      rebakeColorizedTexture();
+      reloaded = m_texture.id != 0;
+    } else if (!m_sourcePath.empty()) {
+      reloaded = reloadSourceFile(
+          renderer, m_sourcePath, m_sourceRequestedTargetSize, m_sourceMipmap, m_sourceCenterSquareCrop
+      );
+    } else if (!m_ownedSourceRgba.empty() && m_ownedSourceRgbaWidth > 0 && m_ownedSourceRgbaHeight > 0) {
+      reloaded = commitColorizedRgba(
+          renderer, m_ownedSourceRgba.data(), m_ownedSourceRgbaWidth, m_ownedSourceRgbaHeight, m_sourceMipmap
+      );
+    }
+
+    if (!reloaded && m_image != nullptr) {
+      m_image->setTextureId({});
+      m_image->setTextureSize(0, 0);
+    }
+    updateLayout();
+    markPaintDirty();
     return;
   }
 
-  if (m_request.has_value() && m_cache != nullptr) {
-    // The cache reloads its resident textures and notifies subscribers.
-    if (m_retiringRequest.has_value()) {
-      m_cache->release(*m_retiringRequest);
-      m_retiringRequest.reset();
-    }
-    m_readySub.disconnect();
-    const TextureHandle handle = m_cache->peek(*m_request);
+  if (m_asyncTextureCache != nullptr && !m_asyncSourcePath.empty()) {
+    const TextureHandle handle =
+        m_asyncTextureCache->peek(m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop);
     if (handle.id != 0) {
-      setTexture(handle, false);
-      m_loadState = ImageLoadState::Ready;
+      m_texture = handle;
+      if (m_image != nullptr) {
+        m_image->setTextureId(m_texture.id);
+      }
+      updateLayout();
+      markPaintDirty();
       return;
     }
-    setTexture({}, false);
-    m_loadState = ImageLoadState::Loading;
-    m_readySub = m_cache->subscribeReady(*m_request, [this](TextureHandle ready) { handleDecodeReady(ready); });
+
+    m_texture = {};
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+      m_image->setTextureSize(0, 0);
+    }
+    subscribeAsyncReady();
+    updateLayout();
+    markPaintDirty();
     return;
   }
 
   if (m_texture.id != 0) {
-    setTexture({}, false);
+    m_texture = {};
+    if (m_image != nullptr) {
+      m_image->setTextureId({});
+      m_image->setTextureSize(0, 0);
+    }
+    updateLayout();
+    markPaintDirty();
+  }
+}
+
+void Image::subscribeAsyncReady() {
+  m_asyncReadySub.disconnect();
+  if (m_asyncTextureCache == nullptr || m_asyncSourcePath.empty()) {
+    return;
+  }
+
+  m_asyncReadySub = m_asyncTextureCache->subscribeReady(
+      m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop,
+      [this](TextureHandle handle) { handleAsyncTextureReady(handle); }
+  );
+}
+
+void Image::handleAsyncTextureReady(TextureHandle handle) {
+  if (handle.id == 0 || m_asyncTextureCache == nullptr || m_asyncSourcePath.empty() || m_renderer == nullptr) {
+    return;
+  }
+  presentAsyncTexture(handle);
+}
+
+void Image::presentAsyncTexture(TextureHandle handle) {
+  if (handle.id == 0 || m_renderer == nullptr) {
+    return;
+  }
+
+  if (m_appIconColorizeTint.has_value() && m_asyncTextureCache != nullptr && !m_asyncSourcePath.empty()) {
+    if (auto loaded = loadImageFile(m_asyncSourcePath, m_asyncTargetSize, m_asyncCenterSquareCrop)) {
+      if (commitColorizedRgba(*m_renderer, loaded->rgba.data(), loaded->width, loaded->height, m_asyncMipmap)) {
+        m_asyncTextureCache->release(m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop);
+        m_sourcePath = m_asyncSourcePath;
+      }
+    }
+  } else {
+    m_texture = handle;
+    m_ownsTexture = false;
+    m_sourcePath = m_asyncSourcePath;
+    if (m_image != nullptr) {
+      m_image->setTextureId(m_texture.id);
+    }
+  }
+
+  m_asyncReadySub.disconnect();
+  updateLayout();
+  markPaintDirty();
+
+  if (m_asyncReadyCallback) {
+    m_asyncReadyCallback();
+  }
+}
+
+void Image::storeColorizationSource(const std::uint8_t* rgba, int width, int height) {
+  if (!m_appIconColorizeTint.has_value() || rgba == nullptr || width <= 0 || height <= 0) {
+    clearColorizationSource();
+    return;
+  }
+
+  const auto byteCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
+  m_colorizationSource.assign(rgba, rgba + byteCount);
+  m_colorizationSourceWidth = width;
+  m_colorizationSourceHeight = height;
+}
+
+void Image::clearColorizationSource() {
+  m_colorizationSource.clear();
+  m_colorizationSourceWidth = 0;
+  m_colorizationSourceHeight = 0;
+}
+
+void Image::applyAppIconColorizationPrep(std::uint8_t* rgba, int width, int height) {
+  if (!m_appIconColorizeTint.has_value()) {
+    return;
+  }
+  const AppIconColorizationStyle style = resolveAppIconColorization(*m_appIconColorizeTint);
+  bakeAppIconForColorization(rgba, width, height, style.tint);
+}
+
+bool Image::commitColorizedRgba(Renderer& renderer, const std::uint8_t* rgba, int width, int height, bool mipmap) {
+  if (rgba == nullptr || width <= 0 || height <= 0) {
+    return false;
+  }
+
+  if (!m_appIconColorizeTint.has_value()) {
+    clearColorizationSource();
+    auto texture = renderer.textureManager().loadFromRgba(rgba, width, height, mipmap);
+    if (texture.id == 0) {
+      return false;
+    }
+    if (m_ownsTexture && m_texture.id != 0) {
+      renderer.textureManager().unload(m_texture);
+    }
+    m_texture = texture;
+    m_ownsTexture = true;
+    if (m_image != nullptr) {
+      m_image->setTextureId(m_texture.id);
+    }
+    return true;
+  }
+
+  storeColorizationSource(rgba, width, height);
+  std::vector<std::uint8_t> baked = m_colorizationSource;
+  applyAppIconColorizationPrep(baked.data(), width, height);
+
+  auto texture = renderer.textureManager().loadFromRgba(baked.data(), width, height, mipmap);
+  if (texture.id == 0) {
+    return false;
+  }
+
+  if (m_ownsTexture && m_texture.id != 0) {
+    renderer.textureManager().unload(m_texture);
+  }
+  m_texture = texture;
+  m_ownsTexture = true;
+  if (m_image != nullptr) {
+    m_image->setTextureId(m_texture.id);
+  }
+  return true;
+}
+
+void Image::rebakeColorizedTexture() {
+  if (m_renderer == nullptr
+      || !m_appIconColorizeTint.has_value()
+      || m_colorizationSource.empty()
+      || m_colorizationSourceWidth <= 0
+      || m_colorizationSourceHeight <= 0) {
+    return;
+  }
+
+  std::vector<std::uint8_t> baked = m_colorizationSource;
+  applyAppIconColorizationPrep(baked.data(), m_colorizationSourceWidth, m_colorizationSourceHeight);
+
+  auto texture = m_renderer->textureManager().loadFromRgba(
+      baked.data(), m_colorizationSourceWidth, m_colorizationSourceHeight, m_sourceMipmap
+  );
+  if (texture.id == 0) {
+    return;
+  }
+
+  if (m_ownsTexture && m_texture.id != 0) {
+    m_renderer->textureManager().unload(m_texture);
+  }
+  m_texture = texture;
+  m_ownsTexture = true;
+  if (m_image != nullptr) {
+    m_image->setTextureId(m_texture.id);
+  }
+  updateLayout();
+  markPaintDirty();
+}
+
+void Image::reloadColorizedSource() {
+  if (m_renderer == nullptr || !m_appIconColorizeTint.has_value()) {
+    return;
+  }
+  if (m_colorizationSource.empty() && !m_ownedSourceRgba.empty()) {
+    storeColorizationSource(m_ownedSourceRgba.data(), m_ownedSourceRgbaWidth, m_ownedSourceRgbaHeight);
+  }
+  if (!m_colorizationSource.empty()) {
+    rebakeColorizedTexture();
+    return;
+  }
+  if (!m_sourcePath.empty() && m_texture.id != 0) {
+    reloadSourceFile(*m_renderer, m_sourcePath, m_sourceRequestedTargetSize, m_sourceMipmap, m_sourceCenterSquareCrop);
+  }
+}
+
+void Image::reloadUncolorizedSource() {
+  if (m_renderer == nullptr || m_appIconColorizeTint.has_value()) {
+    return;
+  }
+
+  if (!m_colorizationSource.empty() && m_colorizationSourceWidth > 0 && m_colorizationSourceHeight > 0) {
+    commitColorizedRgba(
+        *m_renderer, m_colorizationSource.data(), m_colorizationSourceWidth, m_colorizationSourceHeight, m_sourceMipmap
+    );
+    updateLayout();
+    markPaintDirty();
+    return;
+  }
+
+  if (!m_sourcePath.empty()) {
+    reloadSourceFile(*m_renderer, m_sourcePath, m_sourceRequestedTargetSize, m_sourceMipmap, m_sourceCenterSquareCrop);
+    return;
+  }
+
+  if (!m_ownedSourceRgba.empty() && m_ownedSourceRgbaWidth > 0 && m_ownedSourceRgbaHeight > 0) {
+    commitColorizedRgba(
+        *m_renderer, m_ownedSourceRgba.data(), m_ownedSourceRgbaWidth, m_ownedSourceRgbaHeight, m_sourceMipmap
+    );
+    updateLayout();
+    markPaintDirty();
+    return;
+  }
+
+  if (m_asyncTextureCache != nullptr && !m_asyncSourcePath.empty()) {
+    const TextureHandle handle =
+        m_asyncTextureCache->peek(m_asyncSourcePath, m_asyncTargetSize, m_asyncMipmap, m_asyncCenterSquareCrop);
+    if (handle.id != 0) {
+      presentAsyncTexture(handle);
+    }
   }
 }
 
 void Image::applyPalette() {
-  m_image->setBorder(resolveColorSpec(m_border), m_borderWidth);
+  const Color border = resolveColorSpec(m_border);
+  if (m_image == nullptr) {
+    return;
+  }
 
+  m_image->setBorder(border, m_borderWidth);
+  if (!m_appIconColorizeTint.has_value() && !m_colorizationSource.empty()) {
+    reloadUncolorizedSource();
+  }
   if (m_appIconColorizeTint.has_value()) {
     m_image->setTint(rgba(1.0F, 1.0F, 1.0F, 1.0F));
     m_image->setMonochromeTint(false);
     m_image->setAlphaMaskTint(false);
-  } else if (m_foregroundTint.has_value()) {
+    reloadColorizedSource();
+    return;
+  }
+
+  if (m_foregroundTint.has_value()) {
     m_image->setTint(resolveColorSpec(*m_foregroundTint));
     m_image->setMonochromeTint(true);
     m_image->setAlphaMaskTint(true);
-  } else {
-    m_image->setTint(rgba(1.0F, 1.0F, 1.0F, 1.0F));
-    m_image->setMonochromeTint(false);
-    m_image->setAlphaMaskTint(false);
+    return;
   }
 
-  // The colorization bake depends on the palette: file sources request the new bake (keeping the old texture until
-  // it lands); raw sources rebake on the main thread. Both no-op when the bake inputs did not change.
-  syncFileRequest();
-  const std::optional<Color> rawTint = m_appIconColorizeTint.has_value()
-      ? std::optional<Color>(resolveAppIconColorization(*m_appIconColorizeTint).tint)
-      : std::nullopt;
-  const bool rawLightTheme = isResolvedLightTheme();
-  if (!m_rawRgba.empty() && (rawTint != m_rawBakedTint || (rawTint.has_value() && rawLightTheme != m_rawBakedLight))) {
-    rebakeRawSource();
-  }
+  m_image->setTint(rgba(1.0F, 1.0F, 1.0F, 1.0F));
+  m_image->setMonochromeTint(false);
+  m_image->setAlphaMaskTint(false);
 }
 
 void Image::updateLayout() {
+  if (m_image == nullptr) {
+    return;
+  }
+
   float paddedWidth = std::max(0.0F, width() - m_padding * 2.0F);
   float paddedHeight = std::max(0.0F, height() - m_padding * 2.0F);
-  if (m_renderer != nullptr && m_renderer->renderScale() > 0.0F) {
+  if (m_pixelAligned && m_renderer != nullptr && m_renderer->renderScale() > 0.0F) {
     // Whole buffer pixels, so a texture decoded at this size maps 1:1 once the renderer snaps the origin.
     const float scale = m_renderer->renderScale();
     paddedWidth = std::round(paddedWidth * scale) / scale;
@@ -577,7 +1011,20 @@ void Image::updateLayout() {
   m_image->setPosition(m_padding, m_padding);
   m_image->setFrameSize(paddedWidth, paddedHeight);
   m_image->setTextureSize(m_texture.width, m_texture.height);
-  m_image->setFitMode(toFitMode(m_fit));
+
+  ImageFitMode mode = ImageFitMode::Stretch;
+  switch (m_fit) {
+  case ImageFit::Cover:
+    mode = ImageFitMode::Cover;
+    break;
+  case ImageFit::Contain:
+    mode = ImageFitMode::Contain;
+    break;
+  case ImageFit::Stretch:
+    mode = ImageFitMode::Stretch;
+    break;
+  }
+  m_image->setFitMode(mode);
 }
 
 namespace ui {

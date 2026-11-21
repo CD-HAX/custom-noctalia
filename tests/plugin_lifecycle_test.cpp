@@ -777,11 +777,6 @@ int main() {
 
   {
     ConfigService config;
-    // Only local fixtures participate in this test; Git workers would outlive its temporary directory.
-    for (auto source : defaultPluginSources()) {
-      source.enabled = false;
-      config.addPluginSource(source);
-    }
     config.addPluginSource(
         {.kind = PluginSourceKind::Path,
          .name = "lifecycle-test",

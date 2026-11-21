@@ -5,7 +5,6 @@
 #include "ui/signal.h"
 
 #include <functional>
-#include <string>
 #include <string_view>
 
 class Button;
@@ -39,7 +38,7 @@ public:
   LayerShellKeyboard keyboardMode() const override { return LayerShellKeyboard::Exclusive; }
   bool dismissOnOutsideClick() const override { return false; }
   InputArea* initialFocusArea() const override;
-  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit, bool repeat) override;
+  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
 
 private:
   void onPanelCardOpacityChanged(float opacity) override;
@@ -49,7 +48,6 @@ private:
   void cancelAuth();
   bool handleInputKeyEvent(std::uint32_t sym, std::uint32_t modifiers);
   void resolveIcon(Renderer& renderer, const PolkitRequest& request);
-  void loadIcon(Renderer& renderer, const std::string& path, float iconSize);
 
   ConfigService* m_config = nullptr;
   Signal<>::ScopedConnection m_appIconColorizeConn;

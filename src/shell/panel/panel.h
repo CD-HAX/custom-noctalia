@@ -35,19 +35,17 @@ public:
   }
   virtual void onOpen(std::string_view context) { (void)context; }
   virtual void onClose() {}
-  virtual void onKeyboardFocusLost() {}
   virtual void onIconThemeChanged() {}
   virtual void scrollFocusedInputIntoView(InputArea* area) { (void)area; }
   virtual bool isContextActive(std::string_view context) const {
     (void)context;
     return false;
   }
-  virtual bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit, bool repeat) {
+  virtual bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) {
     (void)sym;
     (void)modifiers;
     (void)pressed;
     (void)preedit;
-    (void)repeat;
     return false;
   }
   virtual bool dismissTransientUi() { return false; }

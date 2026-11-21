@@ -84,14 +84,6 @@ void DialogPopupHost::initializeBase(
   m_popupHosts = &popupHosts;
 }
 
-void DialogPopupHost::setTextScale(std::optional<float> scale) {
-  m_textScale = scale;
-  if (m_surface != nullptr) {
-    m_surface->renderTarget().setTextScale(m_textScale);
-    m_surface->requestLayout();
-  }
-}
-
 bool DialogPopupHost::openPopup(std::uint32_t width, std::uint32_t height) {
   if (m_wayland == nullptr || m_renderContext == nullptr || m_popupHosts == nullptr) {
     return false;
@@ -107,7 +99,6 @@ bool DialogPopupHost::openPopup(std::uint32_t width, std::uint32_t height) {
 
   auto surface = std::make_unique<PopupSurface>(*m_wayland);
   surface->setRenderContext(m_renderContext);
-  surface->renderTarget().setTextScale(m_textScale);
   surface->setAnimationManager(&m_animations);
   surface->setConfigureCallback([this](std::uint32_t /*w*/, std::uint32_t /*h*/) { requestLayout(); });
   surface->setPrepareFrameCallback([this](bool needsUpdate, bool needsLayout) {
@@ -164,7 +155,6 @@ bool DialogPopupHost::openPopupAsChild(PopupSurfaceConfig config, const XdgPopup
 
   auto surface = std::make_unique<PopupSurface>(*m_wayland);
   surface->setRenderContext(m_renderContext);
-  surface->renderTarget().setTextScale(m_textScale);
   surface->setAnimationManager(&m_animations);
   surface->setConfigureCallback([this](std::uint32_t /*w*/, std::uint32_t /*h*/) { requestLayout(); });
   surface->setPrepareFrameCallback([this](bool needsUpdate, bool needsLayout) {

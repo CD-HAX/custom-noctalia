@@ -1,13 +1,14 @@
 #include "compositors/umbriel/umbriel_audio_provider.h"
 
 #include "compositors/umbriel/umbriel_runtime.h"
-#include "compositors/unix_socket.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <nlohmann/json.hpp>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <utility>
 
@@ -54,8 +55,16 @@ namespace compositors::umbriel {
   }
 
   bool UmbrielAudioProvider::connectSocket() {
-    m_fd = connectUnixSocket(m_runtime.socketPath(), SOCK_NONBLOCK);
-    return m_fd >= 0;
+    const auto& path = m_runtime.socketPath();
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    if (path.empty() || path.size() >= sizeof(address.sun_path)) {
+      return false;
+    }
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    m_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    // Linux AF_UNIX connect completes immediately or fails (including EAGAIN).
+    return m_fd >= 0 && connect(m_fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0;
   }
 
   void UmbrielAudioProvider::doAddPollFds(std::vector<pollfd>& fds) {

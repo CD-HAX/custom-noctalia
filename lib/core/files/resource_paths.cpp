@@ -79,6 +79,13 @@ namespace paths {
         appendUnique(candidates, exeDir / "assets");
         appendUnique(candidates, exeDir.parent_path() / "assets");
 
+        // When running uninstalled from a build tree, look up parent directories for assets/
+        std::filesystem::path searchDir = exeDir;
+        for (int i = 0; i < 5 && searchDir.has_parent_path() && searchDir != searchDir.parent_path(); ++i) {
+          searchDir = searchDir.parent_path();
+          appendUnique(candidates, searchDir / "assets");
+        }
+
         const std::filesystem::path datadir(NOCTALIA_UI_INSTALL_DATADIR);
         const std::string& name = applicationIdentity().name;
         if (!datadir.empty() && !datadir.is_absolute()) {
@@ -127,6 +134,11 @@ namespace paths {
       // Build tree: lib/assets beside the build directory, as the application's assets/ is.
       if (auto exe = executablePath()) {
         appendUnique(candidates, exe->parent_path().parent_path() / "lib" / "assets");
+        std::filesystem::path searchDir = exe->parent_path();
+        for (int i = 0; i < 5 && searchDir.has_parent_path() && searchDir != searchDir.parent_path(); ++i) {
+          searchDir = searchDir.parent_path();
+          appendUnique(candidates, searchDir / "lib" / "assets");
+        }
       }
       for (const auto& candidate : candidates) {
         if (isLibraryAssetRoot(candidate)) {

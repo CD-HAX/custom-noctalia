@@ -75,18 +75,11 @@ namespace {
     TooltipManager::instance().onHoverChange(nullptr, static_cast<zwlr_layer_surface_v1*>(nullptr), nullptr);
   }
 
-  float dockIconPeakScale(const DockConfig& cfg) {
+  int dockIconDecodeTargetSize(const DockConfig& cfg) {
     const float baseScale = std::max(cfg.activeScale, cfg.inactiveScale);
     const float hoverScale = cfg.magnification ? std::max(1.0F, cfg.magnificationScale) : 1.0F;
-    return std::max(1.0F, baseScale * hoverScale);
-  }
-
-  int dockIconDecodeTargetSize(const DockConfig& cfg) {
-    return std::max(1, static_cast<int>(std::round(static_cast<float>(cfg.iconSize) * dockIconPeakScale(cfg))));
-  }
-
-  ImageSourceOptions dockIconSourceOptions(const DockConfig& cfg) {
-    return {.targetSize = cfg.iconSize, .oversample = dockIconPeakScale(cfg), .mipmap = true};
+    const float peakScale = std::max(1.0F, baseScale * hoverScale);
+    return std::max(1, static_cast<int>(std::round(static_cast<float>(cfg.iconSize) * peakScale)));
   }
 
   float launcherIconBaseY(const DockConfig& cfg, float iconSize) {
@@ -427,7 +420,7 @@ namespace shell::dock {
     const auto iSize = static_cast<float>(cfg.iconSize);
     const float cellMain = iSize + 2.0F * kCellPad;
     const float cellCross = iSize + 2.0F * kCellPad;
-    const ImageSourceOptions iconOptions = dockIconSourceOptions(cfg);
+    const int iconDecodeTarget = dockIconDecodeTargetSize(cfg);
 
     auto areaNode = ui::inputArea({});
     if (!vert) {
@@ -441,8 +434,8 @@ namespace shell::dock {
           .fit = ImageFit::Contain,
           .width = iSize,
           .height = iSize,
-          .configure = [&cfg, iSize, &renderer, &iconOptions](Image& image) {
-            image.setSourceFile(renderer, cfg.launcherCustomImage, iconOptions);
+          .configure = [&cfg, iSize, &renderer, iconDecodeTarget](Image& image) {
+            image.setSourceFile(renderer, cfg.launcherCustomImage, iconDecodeTarget, true);
             image.setForegroundTint(
                 cfg.launcherCustomImageColorize ? std::optional<ColorSpec>{colorSpecFromRole(ColorRole::OnSurface)}
                                                 : std::nullopt
@@ -601,8 +594,8 @@ namespace shell::dock {
       auto iconImg = ui::image({
           .width = iSize,
           .height = iSize,
-          .configure = [&renderer, &source, iconPath, iconOptions = dockIconSourceOptions(cfg),
-                        &shell = deps.model.config.config().shell, &cfg](Image& image) {
+          .configure = [&renderer, &source, iconPath, iconDecodeTarget, &shell = deps.model.config.config().shell,
+                        &cfg](Image& image) {
             image.setAppIconColorization(effectiveShellAppIconColorizationTint(shell, cfg.colorizeIcons));
             if (source) {
               image.setSourceRaw(
@@ -610,22 +603,11 @@ namespace shell::dock {
                   PixmapFormat::RGBA, true
               );
             } else if (!iconPath.empty()) {
-              image.setSourceFile(renderer, iconPath, iconOptions);
+              image.setSourceFile(renderer, iconPath, iconDecodeTarget, true);
             }
             image.setPosition(kCellPad, kCellPad);
           },
       });
-
-      const auto makeFallbackGlyph = [iSize] {
-        return ui::glyph({
-            .glyph = "app-window",
-            .glyphSize = iSize,
-            .color = colorSpecFromRole(ColorRole::OnSurface),
-            .width = iSize,
-            .height = iSize,
-            .configure = [](Glyph& glyph) { glyph.setPosition(kCellPad, kCellPad); },
-        });
-      };
 
       if (iconImg->hasImage()) {
         item.iconImage = iconImg.get();
@@ -657,26 +639,17 @@ namespace shell::dock {
         } else {
           item.iconNode = areaNode->addChild(std::move(iconImg));
         }
-      } else if (iconImg->loadState() == ImageLoadState::Loading) {
-        // The icon and its fallback glyph share one group so hover scale and opacity apply to whichever is shown.
-        item.iconImage = iconImg.get();
-        auto group = ui::node({.x = kCellPad, .y = kCellPad, .width = iSize, .height = iSize});
-        auto fallback = makeFallbackGlyph();
-        fallback->setPosition(0, 0);
-        fallback->setVisible(false);
-        Node* fallbackPtr = fallback.get();
-        iconImg->setPosition(0, 0);
-        iconImg->setAsyncReadyCallback([image = iconImg.get(), fallbackPtr] {
-          if (image->loadState() == ImageLoadState::Failed) {
-            image->setVisible(false);
-            fallbackPtr->setVisible(true);
-          }
-        });
-        group->addChild(std::move(iconImg));
-        group->addChild(std::move(fallback));
-        item.iconNode = areaNode->addChild(std::move(group));
       } else {
-        item.iconNode = areaNode->addChild(makeFallbackGlyph());
+        item.iconNode = areaNode->addChild(
+            ui::glyph({
+                .glyph = "app-window",
+                .glyphSize = iSize,
+                .color = colorSpecFromRole(ColorRole::OnSurface),
+                .width = iSize,
+                .height = iSize,
+                .configure = [](Glyph& glyph) { glyph.setPosition(kCellPad, kCellPad); },
+            })
+        );
       }
 
       if (cfg.showDots) {

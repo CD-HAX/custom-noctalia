@@ -13,6 +13,7 @@
 #include <vector>
 
 class ConfigService;
+class AsyncTextureCache;
 class Flex;
 class InputArea;
 class Label;
@@ -70,7 +71,7 @@ namespace settings {
     // Forgets pointers into the hosting sheet before its nodes are destroyed.
     void detachGrid() noexcept;
 
-    void populateBody(Flex& body, Renderer& renderer);
+    void populateBody(Flex& body, Renderer& renderer, AsyncTextureCache* textureCache);
 
     void onRecommendationsChanged();
     std::optional<std::uint64_t> recommendationCount(const StoreCatalogEntry& entry) const;
@@ -94,8 +95,8 @@ namespace settings {
     bool handleKeyEvent(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit, InputArea* focused);
 
   private:
-    void buildGridView(Flex& body, Renderer& renderer);
-    void buildDetailView(Flex& body, Renderer& renderer);
+    void buildGridView(Flex& body, Renderer& renderer, AsyncTextureCache* textureCache);
+    void buildDetailView(Flex& body, Renderer& renderer, AsyncTextureCache* textureCache);
     void requestRebuild();
     void syncSortButtonGlyph();
     void cycleSortMode();
@@ -153,6 +154,7 @@ namespace settings {
     std::unordered_map<std::string, std::string> m_thumbnailPaths;
 
     Renderer* m_renderer = nullptr;
+    AsyncTextureCache* m_textureCache = nullptr;
     std::unique_ptr<VirtualGridAdapter> m_adapter;
   };
 

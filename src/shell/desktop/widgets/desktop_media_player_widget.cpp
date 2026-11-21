@@ -143,11 +143,9 @@ void DesktopMediaPlayerWidget::create() {
       .fit = ImageFit::Cover,
       .visible = false,
       .participatesInLayout = false,
-      .configure = [this](Image& image) {
+      .configure = [](Image& image) {
         image.setHitTestVisible(false);
         image.setZIndex(0);
-        // layoutDecorations shows the blurred backdrop once it has a texture.
-        image.setAsyncReadyCallback([this] { requestLayout(); });
       },
   });
   presentationRoot()->addChild(std::move(backgroundArtwork));
@@ -354,9 +352,9 @@ void DesktopMediaPlayerWidget::refreshArtworkTextures(Renderer& renderer) {
 
   const int foregroundTarget =
       quantizeDecodeSize(std::max(m_artwork->width(), m_artwork->height()), 64, kMaxArtworkDecodeSize);
-  m_artwork->setSourceFile(
-      renderer, m_artPath, {.targetSize = foregroundTarget, .mipmap = true, .centerSquareCrop = true}
-  );
+  if (!m_artwork->setSourceFile(renderer, m_artPath, foregroundTarget, true, true)) {
+    m_artwork->clear(renderer);
+  }
 
   Node* card = presentationRoot();
   if (!m_albumArtBackground || m_backgroundArtwork == nullptr || card == nullptr) {
@@ -367,10 +365,9 @@ void DesktopMediaPlayerWidget::refreshArtworkTextures(Renderer& renderer) {
   const float cardHeight = card->height();
   const int backgroundTarget =
       quantizeDecodeSize(std::max(cardWidth, cardHeight), kMinBackgroundArtDecodeSize, kMaxBackgroundArtDecodeSize);
-  m_backgroundArtwork->setSourceFile(
-      renderer, m_artPath,
-      {.targetSize = backgroundTarget, .mipmap = true, .blurRadius = static_cast<float>(m_albumArtBlur)}
-  );
+  if (!m_backgroundArtwork->setSourceFileBlurred(renderer, m_artPath, backgroundTarget, m_albumArtBlur, true)) {
+    m_backgroundArtwork->clear(renderer);
+  }
 }
 
 void DesktopMediaPlayerWidget::layoutVertical(Renderer& renderer, float scale) {
@@ -622,15 +619,17 @@ void DesktopMediaPlayerWidget::sync(Renderer& renderer) {
   const bool statusChanged = playbackStatus != m_lastPlaybackStatus;
   const bool canGoPreviousChanged = canGoPrevious != m_lastCanGoPrevious;
   const bool canGoNextChanged = canGoNext != m_lastCanGoNext;
-  // A remote art URL without a local path yet keeps syncing until its download lands in the artwork cache.
-  const bool artworkPending = m_artPath.empty() && !artUrl.empty();
+  const bool foregroundArtAwaitingDecode = m_artwork != nullptr && !artUrl.empty() && !m_artwork->hasImage();
+  const bool backgroundArtAwaitingDecode =
+      m_albumArtBackground && m_backgroundArtwork != nullptr && !artUrl.empty() && !m_backgroundArtwork->hasImage();
   if (!titleChanged
       && !artistChanged
       && !artChanged
       && !statusChanged
       && !canGoPreviousChanged
       && !canGoNextChanged
-      && !artworkPending) {
+      && !foregroundArtAwaitingDecode
+      && !backgroundArtAwaitingDecode) {
     return;
   }
 
@@ -677,7 +676,13 @@ void DesktopMediaPlayerWidget::sync(Renderer& renderer) {
     }
   }
 
-  if (titleChanged || artistChanged || canGoPreviousChanged || canGoNextChanged || artPathChanged) {
+  const bool artworkNeedsLayout = !m_artPath.empty() && (foregroundArtAwaitingDecode || backgroundArtAwaitingDecode);
+  if (titleChanged
+      || artistChanged
+      || canGoPreviousChanged
+      || canGoNextChanged
+      || artPathChanged
+      || artworkNeedsLayout) {
     requestLayout();
   } else {
     requestRedraw();

@@ -61,7 +61,7 @@ namespace process {
 
   // Shell string — runs fully detached (double-fork + setsid) so the child is not a direct
   // subprocess of noctalia (hooks, idle commands, launcher parity).
-  [[nodiscard]] bool runAsync(const std::string& command, const std::vector<EnvOverride>& env = {});
+  [[nodiscard]] bool runAsync(const std::string& command);
   // Shell string — runs on a worker thread, captures stdout/stderr, and invokes callbacks from
   // that worker. Output chunk views are valid only for the callback call.
   [[nodiscard]] bool runAsync(const std::string& command, RunCallbacks callbacks, RunOptions options = {});

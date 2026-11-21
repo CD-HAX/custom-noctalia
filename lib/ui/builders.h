@@ -440,6 +440,7 @@ namespace ui {
     std::optional<bool> visible = std::nullopt;
     std::optional<bool> participatesInLayout = std::nullopt;
     std::function<void(std::optional<std::size_t>)> onSelectionChanged = nullptr;
+    std::function<void(std::optional<std::size_t>)> onHoverChanged = nullptr;
     std::function<void(VirtualGridView&)> configure = nullptr;
   };
 

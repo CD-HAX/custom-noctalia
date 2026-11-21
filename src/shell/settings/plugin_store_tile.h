@@ -11,6 +11,7 @@ class Glyph;
 class Image;
 class Label;
 class Renderer;
+class AsyncTextureCache;
 
 namespace settings {
 
@@ -20,8 +21,8 @@ namespace settings {
 
     void bind(
         const scripting::CatalogEntry& entry, std::string_view source, bool onDisk, bool selected, bool hovered,
-        const std::string& thumbnailPath, Renderer* renderer, std::optional<std::uint64_t> recommendations,
-        bool recommended, bool listed
+        const std::string& thumbnailPath, Renderer* renderer, AsyncTextureCache* textureCache,
+        std::optional<std::uint64_t> recommendations, bool recommended, bool listed
     );
 
   private:

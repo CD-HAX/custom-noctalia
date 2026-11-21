@@ -1,11 +1,14 @@
 #pragma once
 
+#include "core/timer_manager.h"
 #include "launcher/launcher_provider.h"
 #include "launcher/usage_tracker.h"
+#include "render/core/texture_handle.h"
 #include "shell/panel/panel.h"
 #include "system/icon_resolver.h"
 #include "ui/signal.h"
 
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -15,6 +18,7 @@
 
 class ContextMenuPopup;
 class AccountsService;
+class Box;
 class Button;
 class Flex;
 class Glyph;
@@ -66,7 +70,7 @@ public:
   float preferredHeight() const override;
   LayerShellKeyboard keyboardMode() const override { return LayerShellKeyboard::Exclusive; }
   InputArea* initialFocusArea() const override;
-  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit, bool repeat) override;
+  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
   PanelPlacement panelPlacement() const noexcept override;
   bool ignorePointerEvent() const override;
 
@@ -111,6 +115,9 @@ private:
   void finishActivation(LauncherProvider& provider, const std::string& resultId, bool copied, bool appLaunch = false);
   std::vector<LauncherResult> providerOverviewResults(std::string_view text) const;
   [[nodiscard]] bool openAppActionsMenu(std::size_t index, float anchorX, float anchorY);
+  [[nodiscard]] bool openFileActionsMenu(const LauncherResult& base, float anchorX, float anchorY);
+  [[nodiscard]] bool openServiceActionsMenu(const LauncherResult& base, float anchorX, float anchorY);
+  void activateCalculatorResult();
   void updateCategoryFilterModel(const std::vector<LauncherCategory>& categories);
   void rebuildCategoryFilter();
   void rebuildLauncherNavigation();
@@ -138,6 +145,7 @@ private:
   void applyPinnedApplicationOrder();
   void reorderPinnedApplication(std::string_view sourcePath, std::string_view targetPath);
   void syncLauncherAvatar(Renderer& renderer);
+  void syncDetailImage(Renderer& renderer);
   void showProviderOverview();
   void showSessionActions();
   bool usesBrowserLayout() const;
@@ -161,12 +169,71 @@ private:
   Button* m_launcherUsageButton = nullptr;
   Button* m_launcherGridButton = nullptr;
   Button* m_launcherPowerButton = nullptr;
+  Button* m_calcPill = nullptr;
   VirtualGridView* m_grid = nullptr;
   VirtualListView* m_launcherSections = nullptr;
   ScrollView* m_detailScroll = nullptr;
+  Image* m_detailImage = nullptr;
+  std::string m_detailImagePath;
+  std::string m_lastSyncedDetailPath;
+  std::string m_inspectedResultId;
+
+  struct AnimatedGifFrame {
+    TextureHandle handle{};
+    std::chrono::milliseconds duration{0};
+  };
+
+  bool tryLoadDetailGif(Renderer& renderer, const std::string& path);
+  void scheduleNextGifFrame();
+  void onGifFrameTimer();
+  void stopGifAnimation();
+
+  std::vector<AnimatedGifFrame> m_detailGifFrames;
+  std::size_t m_detailGifCurrentFrame = 0;
+  Timer m_detailGifTimer;
+  std::string m_currentGifPath;
+  Renderer* m_renderer = nullptr;
+
   Label* m_detailSubtitle = nullptr;
   Label* m_detailBody = nullptr;
   Label* m_emptyLabel = nullptr;
+
+  // Files browsing & inspector controls
+  Flex* m_filesLeftPane = nullptr;
+  Flex* m_filesNavHeader = nullptr;
+  Button* m_filesUpButton = nullptr;
+  Label* m_filesPathLabel = nullptr;
+  Box* m_filesCenterDivider = nullptr;
+
+  Flex* m_detailFolderBox = nullptr;
+  Glyph* m_detailFolderGlyph = nullptr;
+  Flex* m_detailImageBox = nullptr;
+  Flex* m_detailBinaryBox = nullptr;
+  Glyph* m_detailFileGlyph = nullptr;
+  Label* m_detailBinaryHint = nullptr;
+  Box* m_detailDivider = nullptr;
+  Flex* m_detailMetaTable = nullptr;
+  Flex* m_metaRowName = nullptr;
+  Label* m_metaValueName = nullptr;
+  Flex* m_metaRowType = nullptr;
+  Label* m_metaValueType = nullptr;
+  Flex* m_metaRowSize = nullptr;
+  Label* m_metaValueSize = nullptr;
+  Flex* m_metaRowPath = nullptr;
+  Label* m_metaValuePath = nullptr;
+  Flex* m_metaRowItems = nullptr;
+  Label* m_metaValueItems = nullptr;
+  Flex* m_metaRowLines = nullptr;
+  Label* m_metaValueLines = nullptr;
+  Flex* m_metaRowChars = nullptr;
+  Label* m_metaValueChars = nullptr;
+
+  bool isFilesView() const;
+  void updateFilesNavHeader();
+  void bindFilesInspector(const LauncherResult& result);
+  void filesGoUp();
+  void reapplyQuery();
+
   bool m_anyProviderLoading = false;
   std::unique_ptr<LauncherResultAdapter> m_listAdapter;
   std::unique_ptr<LauncherAppGridAdapter> m_gridAdapter;

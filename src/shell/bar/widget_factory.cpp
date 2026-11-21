@@ -69,6 +69,8 @@
 #include "shell/bar/widgets/wallpaper_widget_definition.h"
 #include "shell/bar/widgets/weather_widget.h"
 #include "shell/bar/widgets/weather_widget_definition.h"
+#include "shell/bar/widgets/workspace_identifier_widget.h"
+#include "shell/bar/widgets/workspace_identifier_widget_definition.h"
 #include "shell/bar/widgets/workspaces_widget.h"
 #include "shell/bar/widgets/workspaces_widget_definition.h"
 #include "wayland/wayland_connection.h"
@@ -120,6 +122,10 @@ std::unique_ptr<Widget> WidgetFactory::create(
   if (it != m_config.widgets.end()) {
     wc = &it->second;
     type = it->second.type;
+  }
+
+  if (type == "fr4j4/hyprland-minimize:bar" || type == "bar") {
+    type = "workspace_identifier";
   }
 
   // Config path prefix used when a widget definition reports a bad setting value.
@@ -361,6 +367,24 @@ std::unique_ptr<Widget> WidgetFactory::create(
             return createWidget<WorkspacesWidget>(
                 context.contentScale, f.m_platform, f.m_configService, context.output,
                 workspacesWidgetDefinition().resolve(context.config, context.settingContext)
+            );
+          }},
+      {"workspace_identifier", [](const WidgetFactory& f, const BuiltinWidgetContext& context) {
+            return createWidget<WorkspaceIdentifierWidget>(
+                context.contentScale, f.m_platform, f.m_configService, context.output,
+                workspaceIdentifierWidgetDefinition().resolve(context.config, context.settingContext)
+            );
+          }},
+      {"workspace-identifier", [](const WidgetFactory& f, const BuiltinWidgetContext& context) {
+            return createWidget<WorkspaceIdentifierWidget>(
+                context.contentScale, f.m_platform, f.m_configService, context.output,
+                workspaceIdentifierWidgetDefinition().resolve(context.config, context.settingContext)
+            );
+          }},
+      {"bar", [](const WidgetFactory& f, const BuiltinWidgetContext& context) {
+            return createWidget<WorkspaceIdentifierWidget>(
+                context.contentScale, f.m_platform, f.m_configService, context.output,
+                workspaceIdentifierWidgetDefinition().resolve(context.config, context.settingContext)
             );
           }},
   });

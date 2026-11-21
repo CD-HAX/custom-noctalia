@@ -3,7 +3,6 @@
 #include "core/log.h"
 #include "render/backend/render_backend.h"
 #include "render/core/image_decoder.h"
-#include "render/core/image_effects.h"
 #include "render/core/image_source_log.h"
 #include "render/core/texture_manager.h"
 #include "render/gl_shared_context.h"
@@ -114,30 +113,37 @@ AsyncTextureCache::~AsyncTextureCache() {
 
 void AsyncTextureCache::initialize(GlSharedContext* sharedGl) { m_sharedGl = sharedGl; }
 
-AsyncTextureCache::ReadySubscription
-AsyncTextureCache::subscribeReady(const ImageDecodeRequest& request, TextureReadyCallback callback) {
-  if (request.path.empty() || !callback) {
+AsyncTextureCache::ReadySubscription AsyncTextureCache::subscribeReady(
+    const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop, TextureReadyCallback callback
+) {
+  auto key = makeKey(path, targetSize, mipmap, centerSquareCrop);
+  if (key.path.empty() || !callback) {
     return {};
   }
 
-  if (auto it = m_entries.find(request); it != m_entries.end() && (it->second.handle.id != 0 || it->second.failed)) {
-    callback(it->second.handle);
+  if (const auto handle = peek(key.path, key.targetSize, key.mipmap, key.centerSquareCrop); handle.id != 0) {
+    callback(handle);
     return {};
   }
 
   const std::uint64_t id = ++m_nextReadyListenerId;
-  m_readyListeners.emplace(id, ReadyListener{.request = request, .callback = std::move(callback)});
+  m_readyListeners.emplace(id, ReadyListener{.key = std::move(key), .callback = std::move(callback)});
   return ReadySubscription{this, m_lifetimeToken, id};
 }
 
-TextureHandle AsyncTextureCache::acquire(const ImageDecodeRequest& request) {
-  if (request.path.empty()) {
+TextureHandle AsyncTextureCache::acquire(const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop) {
+  const auto key = makeKey(path, targetSize, mipmap, centerSquareCrop);
+  if (key.path.empty()) {
     return {};
   }
 
-  auto [it, inserted] = m_entries.try_emplace(request);
+  auto [it, inserted] = m_entries.try_emplace(key);
   Entry& entry = it->second;
-  ++entry.refCount;
+  if (inserted) {
+    entry.refCount = 1;
+  } else {
+    ++entry.refCount;
+  }
   touchEntry(entry);
 
   if (entry.handle.id != 0 || entry.failed) {
@@ -146,28 +152,34 @@ TextureHandle AsyncTextureCache::acquire(const ImageDecodeRequest& request) {
 
   {
     std::scoped_lock lock(m_queueMutex);
-    m_canceled.erase(request);
-    if (!m_inFlight.contains(request)) {
-      m_inFlight.insert(request);
-      m_jobQueue.push_back(request);
+    m_canceled.erase(key);
+    if (!m_inFlight.contains(key)) {
+      m_inFlight.insert(key);
+      m_jobQueue.push_back(key);
     }
   }
   m_queueCv.notify_one();
   return {};
 }
 
-TextureHandle AsyncTextureCache::peek(const ImageDecodeRequest& request) const {
-  auto it = m_entries.find(request);
+TextureHandle
+AsyncTextureCache::peek(const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop) const {
+  const auto key = makeKey(path, targetSize, mipmap, centerSquareCrop);
+  if (key.path.empty()) {
+    return {};
+  }
+
+  auto it = m_entries.find(key);
   return it != m_entries.end() ? it->second.handle : TextureHandle{};
 }
 
-bool AsyncTextureCache::failed(const ImageDecodeRequest& request) const {
-  auto it = m_entries.find(request);
-  return it != m_entries.end() && it->second.failed;
-}
+void AsyncTextureCache::release(const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop) {
+  const auto key = makeKey(path, targetSize, mipmap, centerSquareCrop);
+  if (key.path.empty()) {
+    return;
+  }
 
-void AsyncTextureCache::release(const ImageDecodeRequest& request) {
-  auto it = m_entries.find(request);
+  auto it = m_entries.find(key);
   if (it == m_entries.end()) {
     return;
   }
@@ -191,20 +203,13 @@ void AsyncTextureCache::release(const ImageDecodeRequest& request) {
 
   {
     std::scoped_lock lock(m_queueMutex);
-    if (m_inFlight.contains(request)) {
-      m_canceled.insert(request);
+    if (m_inFlight.contains(key)) {
+      m_canceled.insert(key);
     }
   }
 
   m_entries.erase(it);
 }
-
-std::uint64_t AsyncTextureCache::generation(const std::string& path) const {
-  auto it = m_pathGenerations.find(path);
-  return it != m_pathGenerations.end() ? it->second : 0;
-}
-
-void AsyncTextureCache::invalidatePath(const std::string& path) { ++m_pathGenerations[path]; }
 
 void AsyncTextureCache::doAddPollFds(std::vector<pollfd>& fds) {
   if (m_eventFd < 0) {
@@ -241,8 +246,8 @@ void AsyncTextureCache::dispatch(const std::vector<pollfd>& fds, std::size_t sta
     bool dropped = false;
     {
       std::scoped_lock lock(m_queueMutex);
-      m_inFlight.erase(job.request);
-      if (auto canceled = m_canceled.find(job.request); canceled != m_canceled.end()) {
+      m_inFlight.erase(job.key);
+      if (auto canceled = m_canceled.find(job.key); canceled != m_canceled.end()) {
         m_canceled.erase(canceled);
         dropped = true;
       }
@@ -251,14 +256,13 @@ void AsyncTextureCache::dispatch(const std::vector<pollfd>& fds, std::size_t sta
       continue;
     }
 
-    auto entryIt = m_entries.find(job.request);
+    auto entryIt = m_entries.find(job.key);
     if (entryIt == m_entries.end()) {
       continue;
     }
 
     if (job.failed || job.rgba.empty() || job.width <= 0 || job.height <= 0) {
       entryIt->second.failed = true;
-      notifyReady(job.request, {});
       continue;
     }
 
@@ -267,16 +271,15 @@ void AsyncTextureCache::dispatch(const std::vector<pollfd>& fds, std::size_t sta
       madeCurrent = true;
     }
 
-    entryIt->second.handle = m_textureManager->loadFromRgba(job.rgba.data(), job.width, job.height, job.request.mipmap);
+    entryIt->second.handle = m_textureManager->loadFromRgba(job.rgba.data(), job.width, job.height, job.key.mipmap);
     if (entryIt->second.handle.id == 0) {
       entryIt->second.failed = true;
-      notifyReady(job.request, {});
       continue;
     }
     entryIt->second.handle.sourceWidth = job.sourceWidth;
     entryIt->second.handle.sourceHeight = job.sourceHeight;
     touchEntry(entryIt->second);
-    notifyReady(job.request, entryIt->second.handle);
+    notifyReady(job.key, entryIt->second.handle);
   }
 }
 
@@ -286,8 +289,8 @@ void AsyncTextureCache::abandonGpuResources() noexcept {
   if (m_textureManager != nullptr) {
     m_textureManager->abandonGpuResources();
   }
-  for (auto& [request, entry] : m_entries) {
-    (void)request;
+  for (auto& [key, entry] : m_entries) {
+    (void)key;
     entry.handle = {};
     entry.failed = false;
   }
@@ -300,16 +303,16 @@ void AsyncTextureCache::reloadResidentTextures() {
 
   makeCurrent();
 
-  std::vector<ImageDecodeRequest> resident;
+  std::vector<RequestKey> resident;
   resident.reserve(m_entries.size());
-  for (const auto& [request, entry] : m_entries) {
+  for (const auto& [key, entry] : m_entries) {
     if (entry.handle.id != 0 || entry.refCount > 0) {
-      resident.push_back(request);
+      resident.push_back(key);
     }
   }
 
-  for (const ImageDecodeRequest& request : resident) {
-    auto entryIt = m_entries.find(request);
+  for (const RequestKey& key : resident) {
+    auto entryIt = m_entries.find(key);
     if (entryIt == m_entries.end()) {
       continue;
     }
@@ -321,92 +324,61 @@ void AsyncTextureCache::reloadResidentTextures() {
     entry.handle = {};
     entry.failed = false;
 
-    DecodedJob decoded = decode(request);
-    if (decoded.failed) {
+    auto loaded = loadImageFile(key.path, key.targetSize, key.centerSquareCrop);
+    if (!loaded) {
       entry.failed = true;
-      notifyReady(request, {});
+      kLog.warn("failed to reload image: {} ({})", ImageSourceLog::describe(key.path), loaded.error());
       continue;
     }
 
-    entry.handle = m_textureManager->loadFromRgba(decoded.rgba.data(), decoded.width, decoded.height, request.mipmap);
+    entry.handle = m_textureManager->loadFromRgba(loaded->rgba.data(), loaded->width, loaded->height, key.mipmap);
     if (entry.handle.id == 0) {
       entry.failed = true;
-      notifyReady(request, {});
       continue;
     }
-    entry.handle.sourceWidth = decoded.sourceWidth;
-    entry.handle.sourceHeight = decoded.sourceHeight;
+    entry.handle.sourceWidth = loaded->sourceWidth;
+    entry.handle.sourceHeight = loaded->sourceHeight;
     touchEntry(entry);
-    notifyReady(request, entry.handle);
+    notifyReady(key, entry.handle);
   }
 }
 
-std::size_t AsyncTextureCache::RequestHash::operator()(const ImageDecodeRequest& request) const noexcept {
-  std::size_t seed = std::hash<std::string>{}(request.path);
-  const auto combine = [&seed](std::size_t value) { seed ^= value + 0x9e3779b9U + (seed << 6U) + (seed >> 2U); };
-  const auto combineColor = [&combine](const std::optional<Color>& color) {
-    combine(std::hash<bool>{}(color.has_value()));
-    if (color.has_value()) {
-      combine(std::hash<float>{}(color->r));
-      combine(std::hash<float>{}(color->g));
-      combine(std::hash<float>{}(color->b));
-      combine(std::hash<float>{}(color->a));
-    }
-  };
-  combine(std::hash<int>{}(request.targetSize));
-  combine(std::hash<bool>{}(request.mipmap));
-  combine(std::hash<bool>{}(request.centerSquareCrop));
-  combine(std::hash<int>{}(request.blurRadius));
-  combineColor(request.appIconTint);
-  combine(std::hash<bool>{}(request.appIconLightTheme));
-  combineColor(request.symbolicColor);
-  combine(std::hash<std::uint64_t>{}(request.generation));
+std::size_t AsyncTextureCache::RequestKeyHash::operator()(const RequestKey& key) const noexcept {
+  std::size_t seed = std::hash<std::string>{}(key.path);
+  seed ^= std::hash<int>{}(key.targetSize) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+  seed ^= std::hash<bool>{}(key.mipmap) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+  seed ^= std::hash<bool>{}(key.centerSquareCrop) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
   return seed;
-}
-
-AsyncTextureCache::DecodedJob AsyncTextureCache::decode(const ImageDecodeRequest& request) {
-  DecodedJob result;
-  result.request = request;
-
-  auto loaded = loadImageFile(request.path, request.targetSize, request.centerSquareCrop);
-  if (!loaded) {
-    result.failed = true;
-    kLog.warn("failed to decode image: {} ({})", ImageSourceLog::describe(request.path), loaded.error());
-    return result;
-  }
-
-  if (request.symbolicColor.has_value()) {
-    image_effects::symbolicMask(loaded->rgba, *request.symbolicColor);
-  }
-  if (request.appIconTint.has_value()) {
-    image_effects::colorizeAppIcon(
-        loaded->rgba.data(), loaded->width, loaded->height, *request.appIconTint, request.appIconLightTheme
-    );
-  }
-  image_effects::blur(loaded->rgba, loaded->width, loaded->height, request.blurRadius);
-
-  result.rgba = std::move(loaded->rgba);
-  result.width = loaded->width;
-  result.height = loaded->height;
-  result.sourceWidth = loaded->sourceWidth;
-  result.sourceHeight = loaded->sourceHeight;
-  return result;
 }
 
 void AsyncTextureCache::workerLoop() {
   while (true) {
-    ImageDecodeRequest request;
+    RequestKey key;
     {
       std::unique_lock<std::mutex> lock(m_queueMutex);
       m_queueCv.wait(lock, [this] { return m_shutdown.load() || !m_jobQueue.empty(); });
       if (m_shutdown.load()) {
         return;
       }
-      request = std::move(m_jobQueue.front());
+      key = std::move(m_jobQueue.front());
       m_jobQueue.pop_front();
     }
 
-    pushResult(decode(request));
+    DecodedJob result;
+    result.key = key;
+
+    if (auto loaded = loadImageFile(key.path, key.targetSize, key.centerSquareCrop)) {
+      result.rgba = std::move(loaded->rgba);
+      result.width = loaded->width;
+      result.height = loaded->height;
+      result.sourceWidth = loaded->sourceWidth;
+      result.sourceHeight = loaded->sourceHeight;
+    } else {
+      result.failed = true;
+      kLog.warn("failed to decode image: {} ({})", ImageSourceLog::describe(key.path), loaded.error());
+    }
+
+    pushResult(std::move(result));
   }
 }
 
@@ -449,10 +421,11 @@ void AsyncTextureCache::touchEntry(Entry& entry) { entry.lastTouch = ++m_touchSe
 
 void AsyncTextureCache::removeReadyListener(std::uint64_t id) { m_readyListeners.erase(id); }
 
-void AsyncTextureCache::notifyReady(const ImageDecodeRequest& request, TextureHandle handle) {
+void AsyncTextureCache::notifyReady(const RequestKey& key, TextureHandle handle) {
   std::vector<std::pair<std::uint64_t, TextureReadyCallback>> callbacks;
+  callbacks.reserve(m_readyListeners.size());
   for (const auto& [id, listener] : m_readyListeners) {
-    if (listener.request == request && listener.callback) {
+    if (listener.key == key && listener.callback) {
       callbacks.emplace_back(id, listener.callback);
     }
   }
@@ -465,7 +438,7 @@ void AsyncTextureCache::notifyReady(const ImageDecodeRequest& request, TextureHa
 }
 
 void AsyncTextureCache::pruneUnusedEntries(std::size_t maxUnusedEntries) {
-  using It = std::unordered_map<ImageDecodeRequest, Entry, RequestHash>::iterator;
+  using It = std::unordered_map<RequestKey, Entry, RequestKeyHash>::iterator;
   std::vector<It> unused;
 
   for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
@@ -492,4 +465,11 @@ void AsyncTextureCache::pruneUnusedEntries(std::size_t maxUnusedEntries) {
     }
     m_entries.erase(unused[i]);
   }
+}
+
+AsyncTextureCache::RequestKey
+AsyncTextureCache::makeKey(const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop) {
+  return RequestKey{
+      .path = path, .targetSize = std::max(0, targetSize), .mipmap = mipmap, .centerSquareCrop = centerSquareCrop
+  };
 }

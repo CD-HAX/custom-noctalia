@@ -31,7 +31,9 @@ namespace settings::registry {
     constexpr auto kLauncherProviderSettings = std::to_array<LauncherProviderSettingSpec>({
         {.name = "calculator", .prefixPlaceholder = "calc", .globalByDefault = true},
         {.name = "emoji", .prefixPlaceholder = "emo"},
+        {.name = "files", .prefixPlaceholder = "files", .globalByDefault = true},
         {.name = "panels", .prefixPlaceholder = "pan"},
+        {.name = "services", .prefixPlaceholder = "services"},
         {.name = "session", .prefixPlaceholder = "session"},
         {.name = "wallpaper", .prefixPlaceholder = "wall"},
         {.name = "windows", .prefixPlaceholder = "win"},

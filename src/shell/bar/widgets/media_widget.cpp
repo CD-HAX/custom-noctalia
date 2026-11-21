@@ -31,9 +31,8 @@ MediaWidget::MediaWidget(MprisService* mpris, HttpClient* httpClient, wl_output*
       m_minWidth(static_cast<float>(options.minWidth)), m_artSize(static_cast<float>(options.artSize)),
       m_titleScrollMode(options.titleScrollMode), m_hideWhenNoMedia(options.hideWhenNoMedia),
       m_hideWhenIdle(options.hideWhenIdle), m_rotateAlbumArt(options.rotateAlbumArt),
-      m_circularAlbumArt(options.circularAlbumArt), m_albumArtOnly(options.albumArtOnly),
-      m_hideAlbumArt(options.hideAlbumArt), m_hideArtist(options.hideArtist), m_artistFirst(options.artistFirst),
-      m_showProgress(options.showProgress), m_glyphPosition(options.glyphPosition) {
+      m_albumArtOnly(options.albumArtOnly), m_hideAlbumArt(options.hideAlbumArt), m_hideArtist(options.hideArtist),
+      m_artistFirst(options.artistFirst), m_showProgress(options.showProgress), m_glyphPosition(options.glyphPosition) {
   setPeek(options.peek && !options.albumArtOnly && !options.hideAlbumArt, options.peekDelayMs);
 }
 
@@ -68,20 +67,11 @@ void MediaWidget::create() {
       ui::image({
           .out = &m_art,
           .fit = ImageFit::Cover,
-          .radius = albumArtRadius(artSize),
+          .radius = resolvedBarCapsuleRadius(artSize, artSize),
           .width = artSize,
           .height = artSize,
       })
   );
-  m_art->setAsyncReadyCallback([this] {
-    if (m_art->loadState() == ImageLoadState::Failed) {
-      kLog.warn(R"(artwork load failed url="{}" path="{}")", m_lastArtUrl, m_art->sourcePath());
-    }
-    if (needsFrameTick()) {
-      requestFrameTick();
-    }
-    requestUpdate();
-  });
 
   area->addChild(
       ui::label({
@@ -149,7 +139,7 @@ void MediaWidget::doLayout(Renderer& renderer, float containerWidth, float conta
     artSize = artOnly ? requestedArtSize : std::min(requestedArtSize, m_label->height());
     m_art->setVisible(true);
     m_art->setSize(artSize, artSize);
-    m_art->setRadius(albumArtRadius(artSize));
+    m_art->setRadius(resolvedBarCapsuleRadius(artSize, artSize));
   } else {
     m_art->setVisible(false);
     m_art->setSize(0.0F, 0.0F);
@@ -219,10 +209,6 @@ void MediaWidget::doLayout(Renderer& renderer, float containerWidth, float conta
     m_progressFillVisible = showProgressFill;
     requestUpdate();
   }
-}
-
-float MediaWidget::albumArtRadius(float size) const noexcept {
-  return m_circularAlbumArt ? size * 0.5F : resolvedBarCapsuleRadius(size, size);
 }
 
 void MediaWidget::doUpdate(Renderer& renderer) {
@@ -346,8 +332,7 @@ void MediaWidget::syncState(Renderer& renderer, const std::optional<MprisPlayerI
   const bool textChanged = displayText != m_lastText;
   const bool artChanged = artUrl != m_lastArtUrl;
   const bool playbackChanged = playbackStatus != m_lastPlaybackStatus;
-  // Empty means no art was requested yet, e.g. while the artwork download is still in flight.
-  const bool artAwaitingDecode = !artUrl.empty() && m_art->loadState() == ImageLoadState::Empty;
+  const bool artAwaitingDecode = !artUrl.empty() && !m_art->hasImage();
   if (!textChanged && !artChanged && !playbackChanged && !artAwaitingDecode) {
     return;
   }
@@ -377,11 +362,7 @@ void MediaWidget::syncState(Renderer& renderer, const std::optional<MprisPlayerI
                                         : colorSpecFromRole(ColorRole::OnSurfaceVariant)
   );
 
-  const ImageSourceOptions artOptions{
-      .targetSize = static_cast<int>(std::round(64.0F * m_contentScale)),
-      .mipmap = true,
-      .centerSquareCrop = true,
-  };
+  const int artDecodePx = static_cast<int>(std::round(64.0F * m_contentScale));
   if (artChanged) {
     m_artRotation = 0.0F;
     m_art->setRotation(0.0F);
@@ -392,11 +373,11 @@ void MediaWidget::syncState(Renderer& renderer, const std::optional<MprisPlayerI
           m_httpClient, m_pendingArtDownloads, m_lastArtUrl, [this] { requestUpdate(); }, m_aliveGuard
       );
       if (!artPath.empty()) {
-        m_art->setSourceFile(renderer, artPath, artOptions);
-        if (m_art->loadState() == ImageLoadState::Failed) {
+        if (!m_art->setSourceFile(renderer, artPath, artDecodePx, true, true)) {
           kLog.warn(R"(artwork load failed url="{}" path="{}")", m_lastArtUrl, artPath);
+          m_art->clear(renderer);
         } else {
-          kLog.debug(R"(artwork requested url="{}" path="{}")", m_lastArtUrl, artPath);
+          kLog.debug(R"(artwork loaded url="{}" path="{}")", m_lastArtUrl, artPath);
         }
       } else {
         if (!m_lastArtUrl.empty()) {
@@ -405,9 +386,9 @@ void MediaWidget::syncState(Renderer& renderer, const std::optional<MprisPlayerI
         m_art->clear(renderer);
       }
     }
-  } else if (!m_lastArtUrl.empty() && m_art->loadState() == ImageLoadState::Empty && !m_hideAlbumArt) {
+  } else if (!m_lastArtUrl.empty() && !m_art->hasImage() && !m_hideAlbumArt) {
     const std::string artPath = cachedArtworkPath(m_lastArtUrl);
-    if (!artPath.empty() && m_art->setSourceFile(renderer, artPath, artOptions)) {
+    if (!artPath.empty() && m_art->setSourceFile(renderer, artPath, artDecodePx, false, true)) {
       requestRedraw();
     }
   }

@@ -454,7 +454,7 @@ namespace scripting {
       stopCv.wait(lock, [this] { return stopped; });
     }
 
-    bool enqueue(ScriptEvent&& event) {
+    bool enqueue(ScriptEvent event) {
       bool shouldSchedule = false;
       {
         std::scoped_lock lock(mutex);
@@ -612,23 +612,23 @@ namespace scripting {
     }
 
     void enqueueColorPickerResult(std::uint64_t hostId, int callbackRef, std::optional<std::string> color) {
-      enqueue({
-          .kind = ScriptEventKind::ColorPickerResult,
-          .hostId = hostId,
-          .callbackRef = callbackRef,
-          .colorPickerResult = std::move(color),
-          .budget = kCallBudget,
-      });
+      ScriptEvent event;
+      event.kind = ScriptEventKind::ColorPickerResult;
+      event.hostId = hostId;
+      event.callbackRef = callbackRef;
+      event.colorPickerResult = std::move(color);
+      event.budget = kCallBudget;
+      enqueue(std::move(event));
     }
 
     void enqueueUmbrielActionResult(std::uint64_t hostId, int callbackRef, std::optional<std::string> error) {
-      enqueue({
-          .kind = ScriptEventKind::UmbrielActionResult,
-          .hostId = hostId,
-          .callbackRef = callbackRef,
-          .umbrielActionError = std::move(error),
-          .budget = kCallBudget,
-      });
+      ScriptEvent event;
+      event.kind = ScriptEventKind::UmbrielActionResult;
+      event.hostId = hostId;
+      event.callbackRef = callbackRef;
+      event.umbrielActionError = std::move(error);
+      event.budget = kCallBudget;
+      enqueue(std::move(event));
     }
 
     void enqueueStateWatchResult(int callbackRef, std::string json) {
@@ -1455,13 +1455,12 @@ namespace scripting {
   }
 
   bool ScriptRuntime::enqueueSettingsChanged(ScriptSettings newSettings, ScriptSnapshot snapshot) {
-    return m_state != nullptr
-        && m_state->enqueue({
-            .kind = ScriptEventKind::SettingsChanged,
-            .newSettings = std::move(newSettings),
-            .snapshot = std::move(snapshot),
-            .budget = kCallBudget,
-        });
+    ScriptEvent event;
+    event.kind = ScriptEventKind::SettingsChanged;
+    event.newSettings = std::move(newSettings);
+    event.snapshot = std::move(snapshot);
+    event.budget = kCallBudget;
+    return m_state != nullptr && m_state->enqueue(std::move(event));
   }
 
   bool ScriptRuntime::hasOnIpc() const {

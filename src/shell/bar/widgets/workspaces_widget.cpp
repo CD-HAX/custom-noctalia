@@ -1462,14 +1462,8 @@ void WorkspacesWidget::syncActiveWindowIcon(Renderer& renderer, Item& item) {
 
   item.iconPath = iconPath;
   if (!iconPath.empty()) {
-    // applyItemLayout shows the icon only once it has a texture.
-    item.icon->setAsyncReadyCallback([this] {
-      applyItemLayouts();
-      requestRedraw();
-    });
-    item.icon->setSourceFile(
-        renderer, iconPath, {.targetSize = static_cast<int>(std::round(focusedPillIconSize())), .mipmap = true}
-    );
+    const int iconTargetSize = static_cast<int>(std::round(focusedPillIconSize() * 2.0F));
+    item.icon->setSourceFile(renderer, iconPath, iconTargetSize, true);
   } else {
     item.icon->clear(renderer);
   }

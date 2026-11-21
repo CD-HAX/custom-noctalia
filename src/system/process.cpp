@@ -600,7 +600,7 @@ namespace {
   // grandchild writes errno before exiting.
   bool doubleForkExecDetached(
       const std::vector<std::string>& args, pid_t* reportPid, const std::string& activationToken,
-      const std::string& workingDir = {}, const std::vector<process::EnvOverride>& env = {}
+      const std::string& workingDir = {}
   ) {
     // O_CLOEXEC atomically so concurrent forks on other threads cannot inherit the write ends
     // and hold the handshake open. The grandchild's exec closes its copy, signalling success.
@@ -721,7 +721,6 @@ namespace {
       ::setenv("XDG_ACTIVATION_TOKEN", activationToken.c_str(), 1);
       ::setenv("DESKTOP_STARTUP_ID", activationToken.c_str(), 1);
     }
-    applyEnvOverrides(env);
 
     attachStdioToDevNull();
 
@@ -920,11 +919,11 @@ namespace process {
     return command.has_value() && runAsync(*command, std::move(callbacks), std::move(options));
   }
 
-  bool runAsync(const std::string& command, const std::vector<EnvOverride>& env) {
+  bool runAsync(const std::string& command) {
     if (command.empty()) {
       return false;
     }
-    return doubleForkExecDetached({"/bin/sh", "-lc", command}, nullptr, {}, {}, env);
+    return runAsync(std::vector<std::string>{"/bin/sh", "-lc", command});
   }
 
   bool runAsync(const std::string& command, RunCallbacks callbacks, RunOptions options) {

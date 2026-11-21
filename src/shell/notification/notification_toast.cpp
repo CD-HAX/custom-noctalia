@@ -2643,7 +2643,6 @@ InputArea* NotificationToast::buildCard(
   });
 
   bool iconAssigned = false;
-  Image* fileIcon = nullptr;
   if (entry.icon.has_value()) {
     const std::string& rawIcon = *entry.icon;
     if (rawIcon.size() > kNoctaliaGlyphIconPrefix.size()
@@ -2723,9 +2722,8 @@ InputArea* NotificationToast::buildCard(
               m_config->config().shell, entry.iconIsAppIcon && m_config->config().notification.colorizeIcons
           ));
         }
-        appIcon->setSourceFile(renderer, iconPath, {.targetSize = static_cast<int>(std::round(iconSize))});
-        if (appIcon->loadState() != ImageLoadState::Failed) {
-          fileIcon = static_cast<Image*>(iconSlot->addChild(std::move(appIcon)));
+        if (appIcon->setSourceFile(renderer, iconPath, static_cast<int>(std::round(iconSize)))) {
+          iconSlot->addChild(std::move(appIcon));
           iconAssigned = true;
         } else {
           kLog.warn("notification toast: failed to load icon image for #{} from '{}'", entry.notificationId, iconPath);
@@ -2734,35 +2732,20 @@ InputArea* NotificationToast::buildCard(
     }
   }
 
-  // The bell stays hidden behind a loading file icon and only appears if its decode fails.
-  auto* fallbackGlyph = static_cast<Glyph*>(iconSlot->addChild(
-      ui::glyph({
-          .glyph = "bell",
-          .glyphSize = iconGlyphSize,
-          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-          .visible = !iconAssigned,
-          .configure = [iconSize, &renderer](Glyph& glyph) {
-            glyph.measure(renderer);
-            glyph.setPosition(
-                std::round((iconSize - glyph.width()) * 0.5F), std::round((iconSize - glyph.height()) * 0.5F)
-            );
-          },
-      })
-  ));
-  if (fileIcon != nullptr) {
-    fileIcon->setAsyncReadyCallback([fileIcon, fallbackGlyph, notificationId = entry.notificationId,
-                                     instance = &outputInstance] {
-      if (fileIcon->loadState() == ImageLoadState::Failed) {
-        kLog.warn(
-            "notification toast: failed to load icon image for #{} from '{}'", notificationId, fileIcon->sourcePath()
-        );
-        fileIcon->setVisible(false);
-        fallbackGlyph->setVisible(true);
-      }
-      if (instance->surface != nullptr) {
-        instance->surface->requestRedraw();
-      }
-    });
+  if (!iconAssigned) {
+    iconSlot->addChild(
+        ui::glyph({
+            .glyph = "bell",
+            .glyphSize = iconGlyphSize,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+            .configure = [iconSize, &renderer](Glyph& glyph) {
+              glyph.measure(renderer);
+              glyph.setPosition(
+                  std::round((iconSize - glyph.width()) * 0.5F), std::round((iconSize - glyph.height()) * 0.5F)
+              );
+            },
+        })
+    );
   }
 
   contentRow->addChild(std::move(iconSlot));

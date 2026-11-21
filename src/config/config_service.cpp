@@ -1004,13 +1004,10 @@ void ConfigService::checkReload() {
     }
   });
 
-  // Skip the echo of our own write; an external edit changes the content and still reloads.
-  if (overridesChanged && m_lastWrittenOverridesText.has_value()) {
-    std::string readError;
-    const std::string onDisk = readTextFile(m_overridesPath, &readError);
-    if (readError.empty() && onDisk == *m_lastWrittenOverridesText) {
-      overridesChanged = false;
-    }
+  // Skip the echo of our own write.
+  if (overridesChanged && m_ownOverridesWritePending) {
+    m_ownOverridesWritePending = false;
+    overridesChanged = false;
   }
 
   if (!configChanged && !overridesChanged) {
@@ -1768,7 +1765,9 @@ void ConfigService::loadAll() {
     if (sidecarNeedsPersist) {
       toml::table previousOverrides = m_overridesTable;
       m_overridesTable = std::move(effectiveOverrides);
-      if (!writeOverridesToFile()) {
+      if (writeOverridesToFile()) {
+        m_ownOverridesWritePending = m_inotify.fd() >= 0 && m_overridesWatchWd >= 0;
+      } else {
         kLog.warn("failed to persist migrated config overrides to {}", m_overridesPath);
         m_overridesTable = std::move(previousOverrides);
       }

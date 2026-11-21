@@ -3,6 +3,7 @@
 #include "shell/control_center/shortcut_services.h"
 
 class AccountsService;
+class AsyncTextureCache;
 class BluetoothAgent;
 class BluetoothService;
 class BrightnessService;
@@ -73,6 +74,7 @@ struct ControlCenterServices {
   ClipboardService* clipboard = nullptr;
   AccountsService* accounts = nullptr;
   ThumbnailService* thumbnails = nullptr;
+  AsyncTextureCache* asyncTextures = nullptr;
 
   ShortcutServices shortcutServices() const {
     return {

@@ -106,8 +106,6 @@ public:
   void onThemeChanged();
   void setResolvedPalette(const noctalia::theme::GeneratedPalette& generated, std::string_view mode);
   void onFontChanged();
-  // Text size multiplier for the settings window and the popups it opens (its own, not the shell's).
-  void setTextScale(float scale);
   void requestRedraw();
   void onExternalOptionsChanged();
   void onPluginsChanged();
@@ -298,7 +296,6 @@ private:
   // m_sceneRoot must be destroyed before m_animations — ~Node() calls cancelForOwner().
   AnimationManager m_animations;
   std::unique_ptr<ToplevelSurface> m_surface;
-  float m_textScale = 1.0F;
   std::unique_ptr<Node> m_sceneRoot;
   Flex* m_mainContainer = nullptr; // Outer Flex inside m_sceneRoot, sized to the window
   Box* m_panelBackground = nullptr;

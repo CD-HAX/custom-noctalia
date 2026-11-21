@@ -74,9 +74,6 @@ public:
   std::uint32_t width() const noexcept;
   std::uint32_t height() const noexcept;
 
-  // Text size multiplier for this popup's surface, applied to an open popup too; nullopt follows the RenderContext.
-  void setTextScale(std::optional<float> scale);
-
 protected:
   DialogPopupHost();
 
@@ -123,8 +120,6 @@ protected:
   WaylandConnection* wayland() const noexcept { return m_wayland; }
   DialogPopupSettings settings() const;
   RenderContext* renderContext() const noexcept { return m_renderContext; }
-  // Text scale this popup's surface uses; pass to fixed-scale ScaledRenderers measuring for it.
-  std::optional<float> textScale() const noexcept { return m_textScale; }
   // Stable Renderer view for this popup's own surface. Valid only while open.
   Renderer& renderer() const noexcept;
 
@@ -191,7 +186,6 @@ protected:
   DialogPopupSettingsProvider m_settings;
   RenderContext* m_renderContext = nullptr;
   LayerPopupHostRegistry* m_popupHosts = nullptr;
-  std::optional<float> m_textScale;
 
   std::unique_ptr<PopupSurface> m_surface;
   popup_chrome::Geometry m_chrome;

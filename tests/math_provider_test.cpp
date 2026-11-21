@@ -50,6 +50,10 @@ int main() {
   TEST_CHECK(provider.query("EUR").empty());
   TEST_CHECK(!provider.queryPrefixed("EUR").empty());
   TEST_CHECK(!provider.query("2 + 2").empty());
+  TEST_CHECK(!provider.query("sqrt(16)").empty());
+  TEST_CHECK(!provider.query("10 km to miles").empty());
+  TEST_CHECK(!provider.query("100 C to F").empty());
+  TEST_CHECK(!provider.query("$50 in EUR").empty());
   TEST_CHECK(!commandRuns(provider, marker));
 
   // A definitions directory created after startup is picked up on the next open.

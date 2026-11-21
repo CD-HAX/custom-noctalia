@@ -38,6 +38,7 @@
 #include "shell/bar/widgets/volume_widget_definition.h"
 #include "shell/bar/widgets/wallpaper_widget_definition.h"
 #include "shell/bar/widgets/weather_widget_definition.h"
+#include "shell/bar/widgets/workspace_identifier_widget_definition.h"
 #include "shell/bar/widgets/workspaces_widget_definition.h"
 #include "shell/settings/font_family_catalog.h"
 #include "shell/settings/font_weight_catalog.h"
@@ -170,6 +171,7 @@ namespace settings {
         projectWidgetDefinition<wallpaperWidgetDefinition>(),
         projectWidgetDefinition<weatherWidgetDefinition>(),
         projectWidgetDefinition<workspacesWidgetDefinition>(),
+        projectWidgetDefinition<workspaceIdentifierWidgetDefinition>(),
     };
 
     const TypedWidgetDefinitionProjection* findTypedWidgetDefinitionProjection(std::string_view type) {
@@ -260,6 +262,13 @@ namespace settings {
         {.type = "wallpaper", .labelKey = "settings.widgets.types.wallpaper", .glyph = "wallpaper-selector"},
         {.type = "weather", .labelKey = "settings.widgets.types.weather", .glyph = "weather-cloud"},
         {.type = "workspaces", .labelKey = "settings.widgets.types.workspaces", .glyph = "layout-grid"},
+        {.type = "workspace_identifier",
+         .labelKey = "settings.widgets.types.workspace-identifier",
+         .glyph = "app-window"},
+        {.type = "workspace-identifier",
+         .labelKey = "settings.widgets.types.workspace-identifier",
+         .glyph = "app-window",
+         .visibleInPicker = false},
     };
 
     const WidgetTypeSpec* findWidgetTypeSpec(std::string_view type) {

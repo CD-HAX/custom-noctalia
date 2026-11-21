@@ -494,7 +494,6 @@ namespace noctalia::config::schema {
   const Schema<AccessibilityConfig>& accessibilitySchema() {
     static const Schema<AccessibilityConfig> s = {
         field(&AccessibilityConfig::uiScale, "ui_scale", kScaleRange),
-        field(&AccessibilityConfig::fontScale, "font_scale", kScaleRange),
         field(&AccessibilityConfig::highContrast, "high_contrast"),
     };
     return s;

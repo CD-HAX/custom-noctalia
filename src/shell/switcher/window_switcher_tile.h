@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 
+class AsyncTextureCache;
 class Box;
 class Button;
 class Flex;
@@ -49,7 +50,7 @@ struct WindowSwitcherEntry {
 // Preview card shared by window-switcher presentation styles.
 class WindowSwitcherTile : public InputArea {
 public:
-  explicit WindowSwitcherTile(float contentScale);
+  WindowSwitcherTile(float contentScale, AsyncTextureCache* asyncTextures);
 
   void setCardSize(float width, float height);
   void setShadowStyle(const RoundedRectStyle& style);
@@ -113,6 +114,7 @@ protected:
   std::string m_iconPath;
   int m_iconTargetSize = 0;
   std::shared_ptr<const ScreencopyImage> m_thumbnailImage;
+  AsyncTextureCache* m_asyncTextures = nullptr;
   std::optional<ColorSpec> m_appIconColorizeTint;
   std::function<void()> m_onInvalidate;
   std::function<void()> m_onActivate;

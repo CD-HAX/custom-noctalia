@@ -26,8 +26,7 @@ namespace {
   using noctalia::theme::GeneratedPalette;
   using noctalia::theme::TemplateApplyService;
 
-  // Hooks ignore SIGTERM, so any grace exercises the SIGKILL path; keep it short so the test is fast.
-  constexpr std::chrono::milliseconds kGrace{250};
+  constexpr std::chrono::milliseconds kGrace{1500};
 
   void writeFile(const std::filesystem::path& path, const std::string& text) {
     std::ofstream out(path);

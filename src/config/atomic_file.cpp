@@ -106,7 +106,7 @@ bool writeTextFileAtomic(
     return false;
   }
 
-  if (!writeAll(fd, content) || ::fsync(fd) != 0) {
+  if (!writeAll(fd, content)) {
     closeFd(fd);
     std::filesystem::remove(tmpPath, ec);
     return false;

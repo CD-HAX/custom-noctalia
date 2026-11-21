@@ -181,6 +181,7 @@ bool StateStore::setStringArray(std::string_view owner, std::string_view key, co
     m_state = std::move(previous);
     return false;
   }
+  m_parseError.clear();
   return true;
 }
 
@@ -207,6 +208,8 @@ bool StateStore::setBool(std::string_view owner, std::string_view key, bool valu
     kLog.warn("failed to write {}", m_path.string());
     return false;
   }
+
+  m_parseError.clear();
   return true;
 }
 
@@ -235,6 +238,8 @@ bool StateStore::setString(std::string_view owner, std::string_view key, std::st
     kLog.warn("failed to write {}", m_path.string());
     return false;
   }
+
+  m_parseError.clear();
   return true;
 }
 
@@ -255,16 +260,13 @@ bool StateStore::clearOwner(std::string_view owner) {
     kLog.warn("failed to write {}", m_path.string());
     return false;
   }
+
+  m_parseError.clear();
   return true;
 }
 
 bool StateStore::write() {
   if (m_path.empty()) {
-    return false;
-  }
-  // Refuse to replace an unparsable file with the near-empty table load() fell back to.
-  if (!m_parseError.empty()) {
-    kLog.warn("not overwriting {} because it failed to parse: {}", m_path.string(), m_parseError);
     return false;
   }
 

@@ -31,7 +31,6 @@
 #include "shell/wayland/foreign_toplevels.h"
 #include "shell/wayland/hyprland/focus_grab_service.h"
 #include "shell/wayland/layer_shell.h"
-#include "shell/wayland/output_power_globals.h"
 #include "shell/wayland/output_probe.h"
 #include "shell/wayland/shell_globals.h"
 #include "system/process.h"
@@ -65,7 +64,7 @@ namespace compositors {
   public:
     virtual ~OutputPowerBackend() = default;
     virtual bool setOutputPower(WaylandConnection& wayland, bool on) const = 0;
-    virtual bool isPerOutputTargeted(WaylandConnection& /*wayland*/) const { return false; }
+    virtual bool isPerOutputTargeted() const noexcept { return false; }
   };
 
 } // namespace compositors
@@ -336,28 +335,16 @@ namespace {
     bool setOutputPower(WaylandConnection& wayland, bool on) const override {
       return m_callback && m_callback(wayland, on);
     }
-    bool isPerOutputTargeted(WaylandConnection& /*wayland*/) const override { return m_perOutputTargeted; }
+    bool isPerOutputTargeted() const noexcept override { return m_perOutputTargeted; }
 
   private:
     Callback m_callback;
     bool m_perOutputTargeted = false;
   };
 
-  // wlr-output-power-management when the compositor provides it, wlr-randr otherwise.
-  class GenericOutputPowerBackend final : public compositors::OutputPowerBackend {
-  public:
-    bool setOutputPower(WaylandConnection& wayland, bool on) const override {
-      if (auto& outputPower = wayland.extension<OutputPowerGlobals>(); outputPower.available()) {
-        return outputPower.setMode(on);
-      }
-      return compositors::ext_workspace::setOutputPower(on);
-    }
-
-    // Only the protocol reaches a monitor connected while the others are off; wlr-randr isn't run again on hotplug.
-    bool isPerOutputTargeted(WaylandConnection& wayland) const override {
-      return wayland.extension<OutputPowerGlobals>().available();
-    }
-  };
+  [[nodiscard]] bool setGenericOutputPower(WaylandConnection& /*wayland*/, bool on) {
+    return compositors::ext_workspace::setOutputPower(on);
+  }
 
   [[nodiscard]] std::unique_ptr<compositors::OutputPowerBackend>
   createOutputPowerBackend(compositors::CompositorRuntimeRegistry& runtimeRegistry) {
@@ -396,7 +383,7 @@ namespace {
     case compositors::CompositorKind::Labwc:
     case compositors::CompositorKind::Kde:
     case compositors::CompositorKind::Unknown:
-      return std::make_unique<GenericOutputPowerBackend>();
+      return std::make_unique<LambdaOutputPowerBackend>(&setGenericOutputPower);
     }
     return nullptr;
   }
@@ -1936,7 +1923,7 @@ void CompositorPlatform::onOutputAdded(wl_output* output) {
     m_workspaces->onOutputAdded(output);
   }
   if (m_outputPowerBackend != nullptr
-      && m_outputPowerBackend->isPerOutputTargeted(m_wayland)
+      && m_outputPowerBackend->isPerOutputTargeted()
       && m_lastRequestedOutputPowerState.has_value()) {
     m_outputPowerBackend->setOutputPower(m_wayland, *m_lastRequestedOutputPowerState);
   }

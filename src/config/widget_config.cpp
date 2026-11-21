@@ -130,6 +130,13 @@ namespace noctalia::config {
     spacer.type = "spacer";
     spacer.settings["interactive"] = false;
     seed("spacer", std::move(spacer));
+
+    WidgetConfig workspaceIdentifier;
+    workspaceIdentifier.type = "workspace_identifier";
+    workspaceIdentifier.settings["icon_size"] = static_cast<double>(Style::baseGlyphSize);
+    workspaceIdentifier.settings["max_label_width"] = 140.0;
+    workspaceIdentifier.settings["show_titles"] = true;
+    seed("workspace_identifier", std::move(workspaceIdentifier));
   }
 
   WidgetConfig

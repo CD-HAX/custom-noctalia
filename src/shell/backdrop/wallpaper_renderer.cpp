@@ -1,7 +1,6 @@
 #include "shell/backdrop/wallpaper_renderer.h"
 
 #include "core/log.h"
-#include "core/scoped_timer.h"
 #include "render/backend/render_backend.h"
 #include "render/core/texture_manager.h"
 #include "render/gl_shared_context.h"
@@ -16,7 +15,22 @@
 namespace {
 
   constexpr Logger kLog("wallpaper-render");
+  constexpr float kSlowWallpaperRenderOperationDebugMs = 50.0F;
+  constexpr float kSlowWallpaperRenderOperationWarnMs = 1000.0F;
   constexpr float kMinimumPostProcessAlpha = 0.001F;
+
+  float elapsedSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+  }
+
+  template <typename... Args>
+  void logSlowWallpaperRenderOperation(float ms, std::format_string<Args...> fmt, Args&&... args) {
+    if (ms >= kSlowWallpaperRenderOperationWarnMs) {
+      kLog.warn(fmt, std::forward<Args>(args)...);
+    } else if (ms >= kSlowWallpaperRenderOperationDebugMs) {
+      kLog.debug(fmt, std::forward<Args>(args)...);
+    }
+  }
 
 } // namespace
 
@@ -110,8 +124,8 @@ void WallpaperRenderer::render() {
   );
 
   float ms = elapsedSince(drawStart);
-  logSlowOperation(
-      kLog, ms, "wallpaper draw took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth, m_logicalHeight,
+  logSlowWallpaperRenderOperation(
+      ms, "wallpaper draw took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth, m_logicalHeight,
       m_bufferWidth, m_bufferHeight
   );
 
@@ -120,13 +134,13 @@ void WallpaperRenderer::render() {
     m_backend->endFrame(*m_target);
     checkGraphicsReset();
     ms = elapsedSince(swapStart);
-    logSlowOperation(
-        kLog, ms, "wallpaper swap took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth, m_logicalHeight,
+    logSlowWallpaperRenderOperation(
+        ms, "wallpaper swap took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth, m_logicalHeight,
         m_bufferWidth, m_bufferHeight
     );
   }
   ms = elapsedSince(totalStart);
-  logSlowOperation(kLog, ms, "wallpaper render took {:.1F}ms total", ms);
+  logSlowWallpaperRenderOperation(ms, "wallpaper render took {:.1F}ms total", ms);
 }
 
 void WallpaperRenderer::renderToFramebuffer(const RenderFramebuffer& target) {
@@ -171,12 +185,12 @@ void WallpaperRenderer::renderToFramebuffer(const RenderFramebuffer& target) {
       }
   );
   float ms = elapsedSince(drawStart);
-  logSlowOperation(
-      kLog, ms, "wallpaper framebuffer draw took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth,
-      m_logicalHeight, m_bufferWidth, m_bufferHeight
+  logSlowWallpaperRenderOperation(
+      ms, "wallpaper framebuffer draw took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth, m_logicalHeight,
+      m_bufferWidth, m_bufferHeight
   );
   ms = elapsedSince(totalStart);
-  logSlowOperation(kLog, ms, "wallpaper framebuffer render took {:.1F}ms total", ms);
+  logSlowWallpaperRenderOperation(ms, "wallpaper framebuffer render took {:.1F}ms total", ms);
   // No eglSwapBuffers — caller is responsible for presentation
 }
 
@@ -307,8 +321,8 @@ void WallpaperRenderer::swapBuffers() {
   m_backend->endFrame(*m_target);
   checkGraphicsReset();
   const float ms = elapsedSince(start);
-  logSlowOperation(
-      kLog, ms, "wallpaper swap took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth, m_logicalHeight,
+  logSlowWallpaperRenderOperation(
+      ms, "wallpaper swap took {:.1F}ms ({}x{} logical, {}x{} buffer)", ms, m_logicalWidth, m_logicalHeight,
       m_bufferWidth, m_bufferHeight
   );
 }

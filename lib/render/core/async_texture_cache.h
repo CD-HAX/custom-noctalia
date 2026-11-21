@@ -1,7 +1,6 @@
 #pragma once
 
 #include "core/poll_source.h"
-#include "render/core/color.h"
 #include "render/core/texture_handle.h"
 
 #include <atomic>
@@ -11,7 +10,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -21,29 +19,8 @@
 class GlSharedContext;
 class TextureManager;
 
-// Everything a decode produces, in buffer pixels. Two equal requests share one texture.
-struct ImageDecodeRequest {
-  std::string path;
-  // Bounds the decoded long edge; 0 keeps the source size.
-  int targetSize = 0;
-  bool mipmap = false;
-  // Crops the source to its centered square before bounding it to targetSize.
-  bool centerSquareCrop = false;
-  int blurRadius = 0;
-  // App-icon colorization (image_effects::colorizeAppIcon), resolved from the palette on the main thread.
-  std::optional<Color> appIconTint;
-  bool appIconLightTheme = false;
-  // Symbolic icon recolor (image_effects::symbolicMask).
-  std::optional<Color> symbolicColor;
-  // Bumped by AsyncTextureCache::invalidatePath() so a file changed on disk decodes again.
-  std::uint64_t generation = 0;
-
-  bool operator==(const ImageDecodeRequest&) const = default;
-};
-
 class AsyncTextureCache : public PollSource {
 public:
-  // Receives the texture once decoded, or an empty handle when the decode failed.
   using TextureReadyCallback = std::function<void(TextureHandle)>;
 
   class ReadySubscription {
@@ -77,20 +54,16 @@ public:
 
   void initialize(GlSharedContext* sharedGl);
   void setMakeCurrentCallback(std::function<void()> callback) { m_makeCurrentCallback = std::move(callback); }
+  // centerSquareCrop crops the decoded source to its centered square before bounding it to targetSize.
+  [[nodiscard]] ReadySubscription subscribeReady(
+      const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop, TextureReadyCallback callback
+  );
 
-  // Settled requests (ready or failed) call back immediately and return an empty subscription.
-  [[nodiscard]] ReadySubscription subscribeReady(const ImageDecodeRequest& request, TextureReadyCallback callback);
-
-  // Takes a reference and queues the decode; returns the texture when it is already resident.
-  TextureHandle acquire(const ImageDecodeRequest& request);
-  TextureHandle peek(const ImageDecodeRequest& request) const;
-  [[nodiscard]] bool failed(const ImageDecodeRequest& request) const;
-  void release(const ImageDecodeRequest& request);
-
-  // Generation to stamp on new requests for `path`; invalidatePath() advances it.
-  [[nodiscard]] std::uint64_t generation(const std::string& path) const;
-  void invalidatePath(const std::string& path);
-
+  TextureHandle
+  acquire(const std::string& path, int targetSize = 0, bool mipmap = false, bool centerSquareCrop = false);
+  TextureHandle
+  peek(const std::string& path, int targetSize = 0, bool mipmap = false, bool centerSquareCrop = false) const;
+  void release(const std::string& path, int targetSize = 0, bool mipmap = false, bool centerSquareCrop = false);
   void trimUnused(std::size_t maxUnusedEntries = 0);
   void abandonGpuResources() noexcept;
   void reloadResidentTextures();
@@ -102,8 +75,17 @@ protected:
   void doAddPollFds(std::vector<pollfd>& fds) override;
 
 private:
-  struct RequestHash {
-    std::size_t operator()(const ImageDecodeRequest& request) const noexcept;
+  struct RequestKey {
+    std::string path;
+    int targetSize = 0;
+    bool mipmap = false;
+    bool centerSquareCrop = false;
+
+    bool operator==(const RequestKey& other) const noexcept = default;
+  };
+
+  struct RequestKeyHash {
+    std::size_t operator()(const RequestKey& key) const noexcept;
   };
 
   struct Entry {
@@ -114,7 +96,7 @@ private:
   };
 
   struct DecodedJob {
-    ImageDecodeRequest request;
+    RequestKey key;
     std::vector<std::uint8_t> rgba;
     int width = 0;
     int height = 0;
@@ -124,11 +106,10 @@ private:
   };
 
   struct ReadyListener {
-    ImageDecodeRequest request;
+    RequestKey key;
     TextureReadyCallback callback;
   };
 
-  static DecodedJob decode(const ImageDecodeRequest& request);
   void workerLoop();
   void signalMain();
   void pushResult(DecodedJob job);
@@ -136,7 +117,9 @@ private:
   void touchEntry(Entry& entry);
   void pruneUnusedEntries(std::size_t maxUnusedEntries);
   void removeReadyListener(std::uint64_t id);
-  void notifyReady(const ImageDecodeRequest& request, TextureHandle handle);
+  void notifyReady(const RequestKey& key, TextureHandle handle);
+
+  static RequestKey makeKey(const std::string& path, int targetSize, bool mipmap, bool centerSquareCrop);
 
   GlSharedContext* m_sharedGl = nullptr;
   std::function<void()> m_makeCurrentCallback;
@@ -147,16 +130,15 @@ private:
 
   mutable std::mutex m_queueMutex;
   std::condition_variable m_queueCv;
-  std::deque<ImageDecodeRequest> m_jobQueue;
-  std::unordered_set<ImageDecodeRequest, RequestHash> m_inFlight;
-  std::unordered_set<ImageDecodeRequest, RequestHash> m_canceled;
+  std::deque<RequestKey> m_jobQueue;
+  std::unordered_set<RequestKey, RequestKeyHash> m_inFlight;
+  std::unordered_set<RequestKey, RequestKeyHash> m_canceled;
 
   mutable std::mutex m_resultMutex;
   std::deque<DecodedJob> m_results;
 
   // Main thread only state.
-  std::unordered_map<ImageDecodeRequest, Entry, RequestHash> m_entries;
-  std::unordered_map<std::string, std::uint64_t> m_pathGenerations;
+  std::unordered_map<RequestKey, Entry, RequestKeyHash> m_entries;
   std::uint64_t m_touchSerial = 0;
   std::unordered_map<std::uint64_t, ReadyListener> m_readyListeners;
   std::uint64_t m_nextReadyListenerId = 0;

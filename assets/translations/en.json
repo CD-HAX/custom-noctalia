@@ -879,6 +879,9 @@
       "emoji": {
         "title": "Emoji"
       },
+      "files": {
+        "title": "Files"
+      },
       "panel": {
         "builtin": {
           "clipboard": "Clipboard",
@@ -892,6 +895,9 @@
           "wallpaper": "Wallpaper"
         },
         "title": "Panels"
+      },
+      "services": {
+        "title": "Services"
       },
       "session": {
         "action-subtitle": "Run session action",
@@ -1999,10 +2005,6 @@
           "description": "Font family for the shell interface",
           "label": "Font Family"
         },
-        "font-scale": {
-          "description": "Make all shell text larger or smaller without changing icons or spacing",
-          "label": "Font Scale"
-        },
         "global-shadow-alpha": {
           "description": "Global surface shadow opacity"
         },
@@ -2890,9 +2892,17 @@
           "description": "Also show emoji results in unprefixed search",
           "label": "Emoji in Global Search"
         },
+        "launcher-global-files": {
+          "description": "Also show files and folders in unprefixed search",
+          "label": "Files in Global Search"
+        },
         "launcher-global-panels": {
           "description": "Also show panels in unprefixed search",
           "label": "Panels in Global Search"
+        },
+        "launcher-global-services": {
+          "description": "Also show services in unprefixed search",
+          "label": "Services in Global Search"
         },
         "launcher-global-session": {
           "description": "Also show session actions in unprefixed search",
@@ -2938,9 +2948,17 @@
           "description": "Trigger prefix for emoji search",
           "label": "Emoji Prefix"
         },
+        "launcher-prefix-files": {
+          "description": "Trigger prefix for file and folder search",
+          "label": "Files Prefix"
+        },
         "launcher-prefix-panels": {
           "description": "Trigger prefix for panel search",
           "label": "Panels Prefix"
+        },
+        "launcher-prefix-services": {
+          "description": "Trigger prefix for system and user services",
+          "label": "Services Prefix"
         },
         "launcher-prefix-session": {
           "description": "Trigger prefix for session power actions",
@@ -4682,10 +4700,6 @@
           "description": "Change a workspace's fill and label colors while the pointer hovers over it",
           "label": "Change Color on Hover"
         },
-        "circular-album-art": {
-          "description": "Draw the album artwork as a full circle instead of using the bar capsule radius",
-          "label": "Circular Album Art"
-        },
         "color": {
           "description": "Color role for this widget's icon and label; fixed hex colors are also supported",
           "label": "Color"
@@ -5323,7 +5337,8 @@
         "volume": "Volume",
         "wallpaper": "Wallpaper",
         "weather": "Weather",
-        "workspaces": "Workspaces"
+        "workspaces": "Workspaces",
+        "workspace-identifier": "Workspace Identifier"
       }
     },
     "window": {

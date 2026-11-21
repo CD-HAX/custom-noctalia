@@ -835,6 +835,9 @@ namespace ui {
     if (props.onSelectionChanged) {
       control->setOnSelectionChanged(std::move(props.onSelectionChanged));
     }
+    if (props.onHoverChanged) {
+      control->setOnHoverChanged(std::move(props.onHoverChanged));
+    }
     if (props.configure) {
       props.configure(*control);
     }

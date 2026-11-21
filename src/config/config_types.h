@@ -1206,7 +1206,7 @@ struct ShellConfig {
   };
 
   struct LauncherConfig {
-    static constexpr std::int32_t kDefaultWidth = 760;
+    static constexpr std::int32_t kDefaultWidth = 1000;
 
     LauncherLayout layout = LauncherLayout::Full;
     std::int32_t width = kDefaultWidth;
@@ -1847,7 +1847,6 @@ struct ThemeConfig {
     std::optional<TemplateInputPathModesConfig> inputPathModes;
     std::vector<std::string> outputPaths;
     std::string outputPathDynamic;
-    std::string requiresPath;
     std::string compareTo;
     std::vector<TemplateCompareColorConfig> colorsToCompare;
     std::string preHook;
@@ -1997,7 +1996,6 @@ bool isValidPluginSourceName(std::string_view name);
 
 struct AccessibilityConfig {
   float uiScale = 1.0F;
-  float fontScale = 1.0F; // multiplies all shell text, on top of ui_scale and bar font_scale
   bool highContrast = false;
   bool operator==(const AccessibilityConfig&) const = default;
 };

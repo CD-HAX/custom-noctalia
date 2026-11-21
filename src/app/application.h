@@ -166,7 +166,7 @@ public:
   // Public for signal handler
   static std::atomic<bool> s_shutdownRequested;
 
-  bool runShellCommand(const std::string& command, const std::vector<process::EnvOverride>& env = {});
+  bool runShellCommand(const std::string& command);
   void triggerShellAction(const std::string& action, wl_output* output = nullptr);
   // Highest layer-shell layer occupied by any bar on the given output. Hot
   // corners place their trigger surfaces on this layer.
@@ -236,8 +236,7 @@ private:
   bool setOutputPower(bool on);
   void onIconThemeChanged();
   void refreshIconConsumers();
-  // Applies the effective shell font family and [accessibility] font_scale to the renderer; true if either
-  // changed. The settings window alone also follows the system font size and rebuilds itself when it changes.
+  // Applies the effective shell font family and system text scale to the renderer; true if either changed.
   bool syncShellFont();
   void refreshFontConsumers();
   // Points SVG icons of a theme that follows the color scheme at the current palette; true when that changed

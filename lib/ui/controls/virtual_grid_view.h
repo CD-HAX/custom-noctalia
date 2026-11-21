@@ -59,6 +59,7 @@ public:
 
   // Optional tooltip for the item under the pointer.
   virtual std::string itemTooltip(std::size_t /*index*/) const { return {}; }
+  virtual TooltipContent itemTooltipContent(std::size_t /*index*/) const { return {}; }
 
   // Optional bounds, relative to a cell, for anchoring the item or hovered overlay tooltip.
   virtual std::optional<TooltipAnchorInsets> itemTooltipAnchorInsets(
@@ -177,6 +178,7 @@ public:
   std::size_t layoutColumnCount() const noexcept { return m_layoutColumns; }
 
   void setOnSelectionChanged(std::function<void(std::optional<std::size_t>)> callback);
+  void setOnHoverChanged(std::function<void(std::optional<std::size_t>)> callback);
 
   ScrollView& scrollView() noexcept { return *m_scroll; }
   void cancelPointerGesture();
@@ -242,6 +244,7 @@ private:
   std::optional<std::size_t> m_hoveredIndex;
   std::optional<std::size_t> m_hoveredOverlayIndex;
   std::function<void(std::optional<std::size_t>)> m_onSelectionChanged;
+  std::function<void(std::optional<std::size_t>)> m_onHoverChanged;
 
   // Most recent layout snapshot, used by hit-testing and scrollToIndex
   // without rerunning measurement.

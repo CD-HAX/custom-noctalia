@@ -610,7 +610,6 @@ location = "https://example.invalid/bad"
             ThemeConfig::TemplateInputPathModesConfig{"/d.png", "/l.png"},
             {"/out1", "/out2"},
             "/dyn",
-            "/required",
             "compareX",
             {{"c1", "#aabbcc"}},
             "pre",

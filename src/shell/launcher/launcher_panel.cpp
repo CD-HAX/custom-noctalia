@@ -9,10 +9,14 @@
 #include "cursor-shape-v1-client-protocol.h"
 #include "i18n/i18n.h"
 #include "launcher/app_provider.h"
+#include "launcher/files_provider.h"
 #include "launcher/fuzzy_match.h"
+#include "launcher/services_provider.h"
 #include "render/animation/animation_manager.h"
+#include "render/codecs/codecs.h"
 #include "render/core/async_texture_cache.h"
 #include "render/core/renderer.h"
+#include "render/core/texture_manager.h"
 #include "render/scene/input_area.h"
 #include "render/scene/node.h"
 #include "shell/app_icon_colorization_settings.h"
@@ -29,6 +33,7 @@
 #include "ui/palette.h"
 #include "ui/signal.h"
 #include "ui/style.h"
+#include "util/file_utils.h"
 #include "util/string_utils.h"
 
 #include <algorithm>
@@ -50,7 +55,7 @@ namespace {
   constexpr float kIconSizeDefault = 40.0F;
   constexpr float kIconSizeCompact = 28.0F;
   constexpr std::size_t kAppGridColumns = 5;
-  constexpr float kLauncherHeight = 620.0F;
+  constexpr float kLauncherHeight = 720.0F;
   constexpr std::int32_t kCompactNavigationWidth = 680;
   constexpr float kLauncherAvatarSize = 44.0F;
   constexpr std::string_view kApplicationsProviderId = "Applications";
@@ -60,6 +65,16 @@ namespace {
   constexpr double kTypedUsageScoreCap = 0.5;
   constexpr std::string_view kProviderOverviewProviderId = "__launcher_provider_overview__";
   constexpr std::string_view kProviderOverviewResultPrefix = "provider:";
+
+  bool endsWithIgnoreCase(std::string_view s, std::string_view suffix) {
+    if (s.size() < suffix.size()) {
+      return false;
+    }
+    const std::string_view end = s.substr(s.size() - suffix.size());
+    return std::ranges::equal(end, suffix, [](char a, char b) {
+      return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+    });
+  }
 
   void applyLauncherToolbarStyle(Flex& toolbar, float scale, float opacity) {
     toolbar.setCardStyle(scale, opacity);
@@ -215,7 +230,8 @@ namespace {
 
   class LauncherResultRow final : public Node {
   public:
-    explicit LauncherResultRow(LauncherListStyle style) : m_style(style) {
+    LauncherResultRow(LauncherListStyle style, AsyncTextureCache* asyncTextures)
+        : m_style(style), m_asyncTextures(asyncTextures) {
       const float iconSize = launcherIconSize(m_style);
       const float gap = (m_style.compact ? Style::spaceSm : Style::spaceMd) * m_style.scale;
       const float paddingV = (m_style.compact ? Style::spaceXs * 0.5F : Style::spaceXs) * m_style.scale;
@@ -423,7 +439,12 @@ namespace {
 
       m_image->setAppIconColorization(m_isAppIcon ? m_style.appIconColorizeTint : std::nullopt);
 
-      const bool ready = m_image->setSourceFile(renderer, m_iconPath, {.targetSize = m_iconTargetSize, .mipmap = true});
+      bool ready = false;
+      if (m_asyncTextures != nullptr) {
+        ready = m_image->setSourceFileAsync(renderer, *m_asyncTextures, m_iconPath, m_iconTargetSize, true);
+      } else {
+        ready = m_image->setSourceFile(renderer, m_iconPath, m_iconTargetSize, true);
+      }
 
       m_image->setSize(launcherIconSize(m_style), launcherIconSize(m_style));
       m_image->setVisible(ready);
@@ -482,6 +503,7 @@ namespace {
     Label* m_subtitle = nullptr;
     Glyph* m_pinnedGlyph = nullptr;
     Glyph* m_originGlyph = nullptr;
+    AsyncTextureCache* m_asyncTextures = nullptr;
     std::string m_iconPath;
     std::string m_fallbackGlyph;
     int m_iconTargetSize = 0;
@@ -492,7 +514,8 @@ namespace {
 
   class LauncherAppGridTile final : public Node {
   public:
-    explicit LauncherAppGridTile(LauncherListStyle style) : m_style(style) {
+    LauncherAppGridTile(LauncherListStyle style, AsyncTextureCache* asyncTextures)
+        : m_style(style), m_asyncTextures(asyncTextures) {
       const float gap = Style::spaceXs * m_style.scale;
       const float padding = Style::spaceSm * m_style.scale;
       auto col = ui::column({
@@ -674,7 +697,12 @@ namespace {
 
       m_image->setAppIconColorization(m_isAppIcon ? m_style.appIconColorizeTint : std::nullopt);
 
-      const bool ready = m_image->setSourceFile(renderer, m_iconPath, {.targetSize = m_iconTargetSize, .mipmap = true});
+      bool ready = false;
+      if (m_asyncTextures != nullptr) {
+        ready = m_image->setSourceFileAsync(renderer, *m_asyncTextures, m_iconPath, m_iconTargetSize, true);
+      } else {
+        ready = m_image->setSourceFile(renderer, m_iconPath, m_iconTargetSize, true);
+      }
 
       const float iconSize = launcherIconSize(m_style);
       m_image->setSize(iconSize, iconSize);
@@ -733,6 +761,7 @@ namespace {
     Glyph* m_pinnedGlyph = nullptr;
     Glyph* m_originGlyph = nullptr;
     Label* m_title = nullptr;
+    AsyncTextureCache* m_asyncTextures = nullptr;
     std::string m_iconPath;
     std::string m_fallbackGlyph;
     int m_iconTargetSize = 0;
@@ -758,7 +787,7 @@ namespace {
     using SecondaryActivateCallback = std::function<void(std::size_t, float, float)>;
 
     LauncherSectionRow(
-        LauncherListStyle style, SelectCallback onSelect, ActivateCallback onActivate,
+        LauncherListStyle style, AsyncTextureCache* asyncTextures, SelectCallback onSelect, ActivateCallback onActivate,
         SecondaryActivateCallback onSecondaryActivate
     )
         : m_style(style), m_onSelect(std::move(onSelect)), m_onActivate(std::move(onActivate)),
@@ -827,10 +856,10 @@ namespace {
           return (*m_results)[resultIndex].origin;
         });
 
-        auto tile = std::make_unique<LauncherAppGridTile>(m_style);
+        auto tile = std::make_unique<LauncherAppGridTile>(m_style, asyncTextures);
         m_tiles[slot] = tile.get();
         area->addChild(std::move(tile));
-        auto listRow = std::make_unique<LauncherResultRow>(m_style);
+        auto listRow = std::make_unique<LauncherResultRow>(m_style, asyncTextures);
         listRow->setVisible(false);
         m_listRows[slot] = listRow.get();
         area->addChild(std::move(listRow));
@@ -943,7 +972,7 @@ public:
   using SecondaryActivateCallback = std::function<void(std::size_t, float, float)>;
   using ReorderCallback = std::function<void(std::size_t, std::size_t)>;
 
-  explicit LauncherResultAdapter(LauncherListStyle style) : m_style(style) {}
+  LauncherResultAdapter(LauncherListStyle style, AsyncTextureCache* cache) : m_style(style), m_cache(cache) {}
 
   void setListStyle(LauncherListStyle style) { m_style = style; }
   void setResults(const std::vector<LauncherResult>* results) { m_results = results; }
@@ -961,7 +990,9 @@ public:
 
   std::size_t itemCount() const override { return m_results == nullptr ? 0U : m_results->size(); }
 
-  [[nodiscard]] std::unique_ptr<Node> createTile() override { return std::make_unique<LauncherResultRow>(m_style); }
+  [[nodiscard]] std::unique_ptr<Node> createTile() override {
+    return std::make_unique<LauncherResultRow>(m_style, m_cache);
+  }
 
   void bindTile(Node& tile, std::size_t index, bool selected, bool hovered) override {
     if (m_renderer == nullptr || m_results == nullptr || index >= m_results->size()) {
@@ -973,17 +1004,45 @@ public:
     row->bind(*m_renderer, (*m_results)[index], tile.width(), tile.height(), selected, hovered);
   }
 
-  std::string itemTooltip(std::size_t index) const override {
-    if (m_results == nullptr || index >= m_results->size() || (*m_results)[index].originGlyph.empty()) {
+  TooltipContent itemTooltipContent(std::size_t index) const override {
+    if (m_results == nullptr || index >= m_results->size()) {
       return {};
     }
-    return (*m_results)[index].origin;
+    const auto& res = (*m_results)[index];
+    if (res.providerId == "files") {
+      auto rows = FilesProvider::getTooltipRows(res.id);
+      if (!rows.empty()) {
+        return TooltipContent{std::move(rows)};
+      }
+    }
+    return {};
+  }
+
+  std::string itemTooltip(std::size_t index) const override {
+    if (m_results == nullptr || index >= m_results->size()) {
+      return {};
+    }
+    const auto& res = (*m_results)[index];
+    if (res.providerId == "files") {
+      return FilesProvider::getTooltipString(res.id);
+    }
+    if (res.originGlyph.empty()) {
+      return {};
+    }
+    return res.origin;
   }
 
   std::optional<TooltipAnchorInsets> itemTooltipAnchorInsets(
       std::size_t index, float cellWidth, float cellHeight, bool /*overlayHovered*/
   ) const override {
-    if (m_results == nullptr || index >= m_results->size() || (*m_results)[index].originGlyph.empty()) {
+    if (m_results == nullptr || index >= m_results->size()) {
+      return std::nullopt;
+    }
+    const auto& res = (*m_results)[index];
+    if (res.providerId == "files") {
+      return std::nullopt;
+    }
+    if (res.originGlyph.empty()) {
       return std::nullopt;
     }
     const float glyphSize = Style::fontSizeBody * m_style.scale;
@@ -1075,6 +1134,7 @@ private:
   }
 
   LauncherListStyle m_style{};
+  AsyncTextureCache* m_cache = nullptr;
   Renderer* m_renderer = nullptr;
   const std::vector<LauncherResult>* m_results = nullptr;
   ActivateCallback m_onActivate;
@@ -1092,7 +1152,7 @@ public:
   using SecondaryActivateCallback = std::function<void(std::size_t, float, float)>;
   using ReorderCallback = std::function<void(std::size_t, std::size_t)>;
 
-  explicit LauncherAppGridAdapter(LauncherListStyle style) : m_style(style) {}
+  LauncherAppGridAdapter(LauncherListStyle style, AsyncTextureCache* cache) : m_style(style), m_cache(cache) {}
 
   void setListStyle(LauncherListStyle style) { m_style = style; }
   void setResults(const std::vector<LauncherResult>* results) { m_results = results; }
@@ -1110,7 +1170,9 @@ public:
 
   std::size_t itemCount() const override { return m_results == nullptr ? 0U : m_results->size(); }
 
-  [[nodiscard]] std::unique_ptr<Node> createTile() override { return std::make_unique<LauncherAppGridTile>(m_style); }
+  [[nodiscard]] std::unique_ptr<Node> createTile() override {
+    return std::make_unique<LauncherAppGridTile>(m_style, m_cache);
+  }
 
   void bindTile(Node& tile, std::size_t index, bool selected, bool hovered) override {
     if (m_renderer == nullptr || m_results == nullptr || index >= m_results->size()) {
@@ -1122,17 +1184,45 @@ public:
     gridTile->bind(*m_renderer, (*m_results)[index], tile.width(), tile.height(), selected, hovered);
   }
 
-  std::string itemTooltip(std::size_t index) const override {
-    if (m_results == nullptr || index >= m_results->size() || (*m_results)[index].originGlyph.empty()) {
+  TooltipContent itemTooltipContent(std::size_t index) const override {
+    if (m_results == nullptr || index >= m_results->size()) {
       return {};
     }
-    return (*m_results)[index].origin;
+    const auto& res = (*m_results)[index];
+    if (res.providerId == "files") {
+      auto rows = FilesProvider::getTooltipRows(res.id);
+      if (!rows.empty()) {
+        return TooltipContent{std::move(rows)};
+      }
+    }
+    return {};
+  }
+
+  std::string itemTooltip(std::size_t index) const override {
+    if (m_results == nullptr || index >= m_results->size()) {
+      return {};
+    }
+    const auto& res = (*m_results)[index];
+    if (res.providerId == "files") {
+      return FilesProvider::getTooltipString(res.id);
+    }
+    if (res.originGlyph.empty()) {
+      return {};
+    }
+    return res.origin;
   }
 
   std::optional<TooltipAnchorInsets> itemTooltipAnchorInsets(
       std::size_t index, float cellWidth, float cellHeight, bool /*overlayHovered*/
   ) const override {
-    if (m_results == nullptr || index >= m_results->size() || (*m_results)[index].originGlyph.empty()) {
+    if (m_results == nullptr || index >= m_results->size()) {
+      return std::nullopt;
+    }
+    const auto& res = (*m_results)[index];
+    if (res.providerId == "files") {
+      return std::nullopt;
+    }
+    if (res.originGlyph.empty()) {
       return std::nullopt;
     }
     const float glyphSize = Style::fontSizeBody * m_style.scale;
@@ -1221,6 +1311,7 @@ private:
   }
 
   LauncherListStyle m_style{};
+  AsyncTextureCache* m_cache = nullptr;
   Renderer* m_renderer = nullptr;
   const std::vector<LauncherResult>* m_results = nullptr;
   ActivateCallback m_onActivate;
@@ -1239,10 +1330,10 @@ public:
   using SecondaryActivateCallback = std::function<void(std::size_t, float, float)>;
 
   LauncherSectionsAdapter(
-      LauncherListStyle style, SelectCallback onSelect, ActivateCallback onActivate,
+      LauncherListStyle style, AsyncTextureCache* cache, SelectCallback onSelect, ActivateCallback onActivate,
       SecondaryActivateCallback onSecondaryActivate
   )
-      : m_style(style), m_onSelect(std::move(onSelect)), m_onActivate(std::move(onActivate)),
+      : m_style(style), m_cache(cache), m_onSelect(std::move(onSelect)), m_onActivate(std::move(onActivate)),
         m_onSecondaryActivate(std::move(onSecondaryActivate)) {}
 
   void setListStyle(LauncherListStyle style) { m_style = style; }
@@ -1412,7 +1503,7 @@ public:
   }
 
   [[nodiscard]] std::unique_ptr<Node> createItem() override {
-    return std::make_unique<LauncherSectionRow>(m_style, m_onSelect, m_onActivate, m_onSecondaryActivate);
+    return std::make_unique<LauncherSectionRow>(m_style, m_cache, m_onSelect, m_onActivate, m_onSecondaryActivate);
   }
 
   void bindItem(Renderer& /*renderer*/, Node& item, std::size_t index, float width, bool /*hovered*/) override {
@@ -1433,6 +1524,7 @@ private:
   };
 
   LauncherListStyle m_style{};
+  AsyncTextureCache* m_cache = nullptr;
   SelectCallback m_onSelect;
   ActivateCallback m_onActivate;
   SecondaryActivateCallback m_onSecondaryActivate;
@@ -1449,7 +1541,7 @@ private:
 LauncherPanel::LauncherPanel(ConfigService* config, AccountsService* accounts, AsyncTextureCache* asyncTextures)
     : m_iconResolver(true), m_config(config), m_accounts(accounts), m_asyncTextures(asyncTextures) {}
 
-LauncherPanel::~LauncherPanel() = default;
+LauncherPanel::~LauncherPanel() { stopGifAnimation(); }
 
 bool LauncherPanel::usesBrowserLayout() const {
   return m_scopedProviderId.empty()
@@ -1575,6 +1667,25 @@ void LauncherPanel::create() {
   if (m_input != nullptr && m_input->inputArea() != nullptr) {
     m_input->inputArea()->setTabFocusKey("launcher.search");
   }
+
+  auto calcPill = ui::button({
+      .out = &m_calcPill,
+      .glyph = "calculator",
+      .glyphSize = Style::fontSizeBody * scale,
+      .variant = ButtonVariant::Secondary,
+      .surfaceOpacity = panelCardOpacity(),
+      .tooltip = "Calculator result — Click to copy",
+      .styleRadius = Style::radiusMd,
+      .styleRadiusScale = scale,
+      .visible = false,
+      .participatesInLayout = false,
+      .onClick = [this] { activateCalculatorResult(); },
+      .configure =
+          [scale](Button& button) {
+            button.setControlHeight(Style::controlHeightSm * scale);
+            button.inputArea()->setTabFocusKey("launcher.calc-pill");
+          },
+  });
 
   auto categoryFilter = ui::segmented({
       .out = &m_categoryFilter,
@@ -1712,8 +1823,8 @@ void LauncherPanel::create() {
   });
 
   const LauncherListStyle initialStyle = launcherListStyleFrom(m_config, scale, panelCardOpacity());
-  m_listAdapter = std::make_unique<LauncherResultAdapter>(initialStyle);
-  m_gridAdapter = std::make_unique<LauncherAppGridAdapter>(initialStyle);
+  m_listAdapter = std::make_unique<LauncherResultAdapter>(initialStyle, m_asyncTextures);
+  m_gridAdapter = std::make_unique<LauncherAppGridAdapter>(initialStyle, m_asyncTextures);
   m_listAdapter->setResults(&m_results);
   m_gridAdapter->setResults(&m_results);
   const auto onActivate = [this](std::size_t index) { activateAt(index); };
@@ -1721,7 +1832,8 @@ void LauncherPanel::create() {
     (void)openAppActionsMenu(index, ax, ay);
   };
   m_launcherSectionsAdapter = std::make_unique<LauncherSectionsAdapter>(
-      initialStyle, [this](std::size_t index) { selectResult(index, false); }, onActivate, onSecondaryActivate
+      initialStyle, m_asyncTextures, [this](std::size_t index) { selectResult(index, false); }, onActivate,
+      onSecondaryActivate
   );
   m_launcherSectionsAdapter->setResults(&m_results);
   m_listAdapter->setOnActivate(onActivate);
@@ -1758,7 +1870,51 @@ void LauncherPanel::create() {
       })
   );
 
-  resultsViewport->addChild(
+  auto leftPane = ui::column({
+      .out = &m_filesLeftPane,
+      .align = FlexAlign::Stretch,
+      .fillWidth = true,
+      .flexGrow = 1.0F,
+  });
+
+  auto navHeader = ui::row({
+      .out = &m_filesNavHeader,
+      .align = FlexAlign::Center,
+      .gap = Style::spaceSm * scale,
+      .paddingV = Style::spaceXs * 0.5F * scale,
+      .paddingH = Style::spaceSm * scale,
+      .fillWidth = true,
+      .visible = false,
+      .participatesInLayout = false,
+  });
+  navHeader->addChild(
+      ui::button({
+          .out = &m_filesUpButton,
+          .glyph = "arrow-up",
+          .glyphSize = 13.0F * scale,
+          .controlHeight = 24.0F * scale,
+          .variant = ButtonVariant::Ghost,
+          .surfaceOpacity = panelCardOpacity(),
+          .styleRadius = Style::radiusSm,
+          .width = 24.0F * scale,
+          .visible = false,
+          .participatesInLayout = false,
+          .onClick = [this] { filesGoUp(); },
+      })
+  );
+  navHeader->addChild(
+      ui::label({
+          .out = &m_filesPathLabel,
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::Primary),
+          .maxLines = 1,
+          .ellipsize = TextEllipsize::Middle,
+          .flexGrow = 1.0F,
+      })
+  );
+  leftPane->addChild(std::move(navHeader));
+
+  leftPane->addChild(
       ui::virtualGridView({
           .out = &m_grid,
           .columns = 1,
@@ -1774,9 +1930,29 @@ void LauncherPanel::create() {
               [this](std::optional<std::size_t> idx) {
                 if (idx.has_value() && *idx < m_results.size()) {
                   m_selectedIndex = *idx;
+                  if (isFilesView()) {
+                    bindFilesInspector(m_results[*idx]);
+                  }
+                }
+              },
+          .onHoverChanged =
+              [this](std::optional<std::size_t> idx) {
+                if (idx.has_value() && *idx < m_results.size()) {
+                  selectResult(*idx, false);
                 }
               },
           .configure = [](VirtualGridView& grid) { grid.setFillWidth(true); },
+      })
+  );
+  resultsViewport->addChild(std::move(leftPane));
+
+  resultsViewport->addChild(
+      ui::box({
+          .out = &m_filesCenterDivider,
+          .fill = colorSpecFromRole(ColorRole::OutlineVariant),
+          .width = 1.0F,
+          .visible = false,
+          .participatesInLayout = false,
       })
   );
 
@@ -1798,6 +1974,85 @@ void LauncherPanel::create() {
   detailContent->setAlign(FlexAlign::Stretch);
   detailContent->setGap(Style::spaceSm * scale);
   detailContent->addChild(
+      ui::column(
+          {
+              .out = &m_detailFolderBox,
+              .align = FlexAlign::Center,
+              .justify = FlexJustify::Center,
+              .fillWidth = true,
+              .height = 320.0F * scale,
+              .visible = false,
+              .participatesInLayout = false,
+          },
+          ui::glyph({
+              .out = &m_detailFolderGlyph,
+              .glyph = "folder",
+              .glyphSize = 96.0F * scale,
+              .color = colorSpecFromRole(ColorRole::Primary),
+          })
+      )
+  );
+  detailContent->addChild(
+      ui::column(
+          {
+              .out = &m_detailImageBox,
+              .align = FlexAlign::Stretch,
+              .justify = FlexJustify::Center,
+              .fillWidth = true,
+              .height = 360.0F * scale,
+              .visible = false,
+              .participatesInLayout = false,
+          },
+          ui::image({
+              .out = &m_detailImage,
+              .fit = ImageFit::Contain,
+              .styleRadius = Style::radiusSm,
+              .styleRadiusScale = scale,
+              .height = 360.0F * scale,
+              .visible = false,
+              .participatesInLayout = false,
+              .configure = [](Image& image) { image.setPixelAligned(true); },
+          })
+      )
+  );
+  m_detailImage->setAsyncReadyCallback([this] {
+    if (m_detailImage == nullptr || m_detailImagePath.empty()) {
+      return;
+    }
+    m_detailImage->setVisible(true);
+    m_detailImage->setParticipatesInLayout(true);
+    PanelManager::instance().requestLayout();
+    PanelManager::instance().requestRedraw();
+    PanelManager::instance().refresh();
+  });
+  detailContent->addChild(
+      ui::column(
+          {
+              .out = &m_detailBinaryBox,
+              .align = FlexAlign::Center,
+              .justify = FlexJustify::Center,
+              .gap = Style::spaceSm * scale,
+              .fillWidth = true,
+              .height = 320.0F * scale,
+              .visible = false,
+              .participatesInLayout = false,
+          },
+          ui::glyph({
+              .out = &m_detailFileGlyph,
+              .glyph = "file",
+              .glyphSize = 64.0F * scale,
+              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+          }),
+          ui::label({
+              .out = &m_detailBinaryHint,
+              .text = "Binary File Buffer",
+              .fontSize = Style::fontSizeCaption * scale,
+              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+              .maxLines = 1,
+          })
+      )
+  );
+  detailContent->addChild(
       ui::label({
           .out = &m_detailSubtitle,
           .fontSize = Style::fontSizeCaption * scale,
@@ -1815,8 +2070,69 @@ void LauncherPanel::create() {
           .color = colorSpecFromRole(ColorRole::OnSurface),
           .maxLines = 0,
           .flexGrow = 1.0F,
+          .visible = false,
+          .participatesInLayout = false,
       })
   );
+  detailContent->addChild(
+      ui::box({
+          .out = &m_detailDivider,
+          .fill = colorSpecFromRole(ColorRole::OutlineVariant),
+          .height = 1.0F,
+          .visible = false,
+          .participatesInLayout = false,
+      })
+  );
+
+  auto metaTable = ui::column({
+      .out = &m_detailMetaTable,
+      .gap = 2.0F * scale,
+      .fillWidth = true,
+      .visible = false,
+      .participatesInLayout = false,
+  });
+
+  auto createMetaRow = [&](Flex** outRow, std::string_view key, Label** outVal, bool bold = false) {
+    return ui::row(
+        {
+            .out = outRow,
+            .align = FlexAlign::Center,
+            .justify = FlexJustify::SpaceBetween,
+            .gap = 12.0F * scale,
+            .paddingH = Style::spaceXs * scale,
+            .fillWidth = true,
+            .height = 24.0F * scale,
+        },
+        ui::label({
+            .text = std::string(key),
+            .fontSize = Style::fontSizeCaption * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+            .minWidth = 56.0F * scale,
+            .maxWidth = 72.0F * scale,
+            .maxLines = 1,
+            .textAlign = TextAlign::Start,
+        }),
+        ui::label({
+            .out = outVal,
+            .fontSize = Style::fontSizeCaption * scale,
+            .fontWeight = bold ? FontWeight::Bold : FontWeight::Normal,
+            .color = colorSpecFromRole(ColorRole::OnSurface),
+            .maxLines = 1,
+            .textAlign = TextAlign::End,
+            .ellipsize = TextEllipsize::Middle,
+            .flexGrow = 1.0F,
+        })
+    );
+  };
+
+  metaTable->addChild(createMetaRow(&m_metaRowName, "Name", &m_metaValueName, true));
+  metaTable->addChild(createMetaRow(&m_metaRowType, "Type", &m_metaValueType));
+  metaTable->addChild(createMetaRow(&m_metaRowSize, "Size", &m_metaValueSize));
+  metaTable->addChild(createMetaRow(&m_metaRowPath, "Path", &m_metaValuePath));
+  metaTable->addChild(createMetaRow(&m_metaRowItems, "Items", &m_metaValueItems));
+  metaTable->addChild(createMetaRow(&m_metaRowLines, "Lines", &m_metaValueLines));
+  metaTable->addChild(createMetaRow(&m_metaRowChars, "Chars", &m_metaValueChars));
+  detailContent->addChild(std::move(metaTable));
   resultsViewport->addChild(std::move(detailScroll));
 
   resultsViewport->addChild(
@@ -1866,6 +2182,7 @@ void LauncherPanel::create() {
             .height = toolbarSideWidth,
             .visible = false,
             .participatesInLayout = false,
+            .configure = [](Image& image) { image.setPixelAligned(true); },
         })
     );
     profile->addChild(
@@ -1900,6 +2217,7 @@ void LauncherPanel::create() {
     toolbar->addChild(std::move(profile));
     input->setFlexGrow(1.0F);
     toolbar->addChild(std::move(input));
+    toolbar->addChild(std::move(calcPill));
     const bool showSessionButton = m_config == nullptr || m_config->config().shell.launcher.showSessionButton;
     const bool searchOnTop = m_config != nullptr
         && m_config->config().shell.launcher.searchPosition == ShellConfig::LauncherSearchPosition::Top;
@@ -1945,7 +2263,15 @@ void LauncherPanel::create() {
         .align = FlexAlign::Stretch,
         .gap = Style::spaceSm * scale,
     });
-    container->addChild(std::move(input));
+    auto inputRow = ui::row({
+        .align = FlexAlign::Center,
+        .gap = Style::spaceSm * scale,
+        .fillWidth = true,
+    });
+    input->setFlexGrow(1.0F);
+    inputRow->addChild(std::move(input));
+    inputRow->addChild(std::move(calcPill));
+    container->addChild(std::move(inputRow));
     container->addChild(std::move(categoryFilter));
     container->addChild(std::move(body));
     setRoot(std::move(container));
@@ -2213,6 +2539,7 @@ void LauncherPanel::onPanelCardOpacityChanged(float opacity) {
            m_launcherGridButton,
            m_launcherSettingsButton,
            m_launcherPowerButton,
+           m_calcPill,
        }) {
     if (button != nullptr) {
       button->setSurfaceOpacity(opacity);
@@ -2228,12 +2555,15 @@ void LauncherPanel::doLayout(Renderer& renderer, float width, float height) {
     return;
   }
 
+  m_renderer = &renderer;
+
   if (m_categoryFilterRebuildPending) {
     rebuildCategoryFilter();
   }
   updateLauncherOptionButtons();
   syncLauncherListStyle();
   syncLauncherViewLayout(&renderer);
+  syncDetailImage(renderer);
 
   m_container->setSize(width, height);
   m_container->layout(renderer);
@@ -2245,9 +2575,122 @@ void LauncherPanel::doLayout(Renderer& renderer, float width, float height) {
 }
 
 void LauncherPanel::doUpdate(Renderer& renderer) {
+  m_renderer = &renderer;
   if (m_browserMode) {
     syncLauncherAvatar(renderer);
   }
+  syncDetailImage(renderer);
+}
+
+void LauncherPanel::syncDetailImage(Renderer& renderer) {
+  m_renderer = &renderer;
+  if (m_detailImage == nullptr) {
+    return;
+  }
+  if (m_detailImagePath.empty()) {
+    if (!m_currentGifPath.empty() || !m_detailGifFrames.empty()) {
+      stopGifAnimation();
+    }
+    m_lastSyncedDetailPath.clear();
+    m_detailImage->clear(renderer);
+    m_detailImage->setVisible(false);
+    m_detailImage->setParticipatesInLayout(false);
+    return;
+  }
+
+  if (m_lastSyncedDetailPath == m_detailImagePath) {
+    return;
+  }
+
+  if (!m_currentGifPath.empty() || !m_detailGifFrames.empty()) {
+    stopGifAnimation();
+  }
+
+  m_lastSyncedDetailPath = m_detailImagePath;
+
+  if (endsWithIgnoreCase(m_detailImagePath, ".gif") && tryLoadDetailGif(renderer, m_detailImagePath)) {
+    PanelManager::instance().requestRedraw();
+    return;
+  }
+
+  const int targetSize = static_cast<int>(std::round(720.0F * contentScale()));
+  const bool ready = m_asyncTextures != nullptr
+      ? m_detailImage->setSourceFileAsync(renderer, *m_asyncTextures, m_detailImagePath, targetSize, false, false)
+      : m_detailImage->setSourceFile(renderer, m_detailImagePath, targetSize, false, false);
+  m_detailImage->setVisible(true);
+  m_detailImage->setParticipatesInLayout(true);
+  if (ready) {
+    PanelManager::instance().requestRedraw();
+  }
+}
+
+bool LauncherPanel::tryLoadDetailGif(Renderer& renderer, const std::string& path) {
+  stopGifAnimation();
+
+  const std::vector<std::uint8_t> bytes = FileUtils::readBinaryFile(path);
+  if (bytes.empty()) {
+    return false;
+  }
+
+  constexpr int kMaxLauncherGifFrames = 256;
+  constexpr std::size_t kMaxLauncherGifBytes = 64ULL * 1024 * 1024;
+  auto decoded = codecs::decodeAnimatedGif(bytes.data(), bytes.size(), kMaxLauncherGifFrames, kMaxLauncherGifBytes);
+  if (!decoded) {
+    return false;
+  }
+  if (decoded->frames.size() <= 1) {
+    return false;
+  }
+
+  m_detailGifFrames.reserve(decoded->frames.size());
+  for (const auto& frame : decoded->frames) {
+    TextureHandle handle =
+        renderer.textureManager().loadFromRgba(frame.rgba.data(), decoded->width, decoded->height, /*mipmap=*/false);
+    if (handle.id == 0) {
+      stopGifAnimation();
+      return false;
+    }
+    const auto duration = frame.durationMs <= 10U ? 100U : frame.durationMs;
+    m_detailGifFrames.push_back(AnimatedGifFrame{handle, std::chrono::milliseconds(duration)});
+  }
+
+  m_currentGifPath = path;
+  m_detailGifCurrentFrame = 0;
+  m_detailImage->setExternalTexture(renderer, m_detailGifFrames[0].handle);
+  m_detailImage->setVisible(true);
+  m_detailImage->setParticipatesInLayout(true);
+  scheduleNextGifFrame();
+  return true;
+}
+
+void LauncherPanel::scheduleNextGifFrame() {
+  if (m_detailGifFrames.size() <= 1) {
+    return;
+  }
+  const auto delay = m_detailGifFrames[m_detailGifCurrentFrame].duration;
+  m_detailGifTimer.start(delay, [this] { onGifFrameTimer(); });
+}
+
+void LauncherPanel::onGifFrameTimer() {
+  if (m_detailGifFrames.size() <= 1 || m_renderer == nullptr || m_detailImage == nullptr) {
+    return;
+  }
+  m_detailGifCurrentFrame = (m_detailGifCurrentFrame + 1) % m_detailGifFrames.size();
+  m_detailImage->setExternalTexture(*m_renderer, m_detailGifFrames[m_detailGifCurrentFrame].handle);
+  PanelManager::instance().requestRedraw();
+  scheduleNextGifFrame();
+}
+
+void LauncherPanel::stopGifAnimation() {
+  m_detailGifTimer.stop();
+  if (m_renderer != nullptr) {
+    for (auto& frame : m_detailGifFrames) {
+      m_renderer->textureManager().unload(frame.handle);
+    }
+  }
+  m_detailGifFrames.clear();
+  m_detailGifCurrentFrame = 0;
+  m_currentGifPath.clear();
 }
 
 void LauncherPanel::syncLauncherAvatar(Renderer& renderer) {
@@ -2282,10 +2725,11 @@ void LauncherPanel::syncLauncherAvatar(Renderer& renderer) {
     m_launcherAvatarFallback->setParticipatesInLayout(true);
   }
 
-  // Centered square at the avatar's display size, drawn pixel-aligned: any resampling makes it look blurry.
+  // Centered square at the avatar's buffer-pixel size, drawn pixel-aligned: any resampling makes it look blurry.
   const int targetSize = static_cast<int>(std::round(kLauncherAvatarSize * contentScale()));
-  const bool ready =
-      m_launcherAvatar->setSourceFile(renderer, displayPath, {.targetSize = targetSize, .centerSquareCrop = true});
+  const bool ready = m_asyncTextures != nullptr
+      ? m_launcherAvatar->setSourceFileAsync(renderer, *m_asyncTextures, displayPath, targetSize, false, true)
+      : m_launcherAvatar->setSourceFile(renderer, displayPath, targetSize, false, true);
   if (ready) {
     m_launcherAvatar->setVisible(true);
     m_launcherAvatar->setParticipatesInLayout(true);
@@ -2393,6 +2837,9 @@ void LauncherPanel::onOpen(std::string_view context) {
 }
 
 void LauncherPanel::onClose() {
+  stopGifAnimation();
+  m_lastSyncedDetailPath.clear();
+  m_inspectedResultId.clear();
   if (m_actionsMenu != nullptr && m_actionsMenu->isOpen()) {
     m_actionsMenu->close();
   }
@@ -2456,12 +2903,42 @@ void LauncherPanel::onClose() {
   m_launcherUsageButton = nullptr;
   m_launcherGridButton = nullptr;
   m_launcherPowerButton = nullptr;
+  m_calcPill = nullptr;
   m_grid = nullptr;
   m_launcherSections = nullptr;
   m_detailScroll = nullptr;
+  m_detailFolderBox = nullptr;
+  m_detailImageBox = nullptr;
+  m_detailBinaryBox = nullptr;
+  m_detailImage = nullptr;
+  m_detailImagePath.clear();
   m_detailSubtitle = nullptr;
   m_detailBody = nullptr;
   m_emptyLabel = nullptr;
+  m_filesLeftPane = nullptr;
+  m_filesNavHeader = nullptr;
+  m_filesUpButton = nullptr;
+  m_filesPathLabel = nullptr;
+  m_filesCenterDivider = nullptr;
+  m_detailFolderGlyph = nullptr;
+  m_detailFileGlyph = nullptr;
+  m_detailBinaryHint = nullptr;
+  m_detailDivider = nullptr;
+  m_detailMetaTable = nullptr;
+  m_metaRowName = nullptr;
+  m_metaValueName = nullptr;
+  m_metaRowType = nullptr;
+  m_metaValueType = nullptr;
+  m_metaRowSize = nullptr;
+  m_metaValueSize = nullptr;
+  m_metaRowPath = nullptr;
+  m_metaValuePath = nullptr;
+  m_metaRowItems = nullptr;
+  m_metaValueItems = nullptr;
+  m_metaRowLines = nullptr;
+  m_metaValueLines = nullptr;
+  m_metaRowChars = nullptr;
+  m_metaValueChars = nullptr;
   m_launcherAvatarPath.clear();
   clearReleasedRoot();
 }
@@ -2526,6 +3003,8 @@ void LauncherPanel::onProviderResultsChanged() {
   if (m_input == nullptr) {
     return;
   }
+  m_inspectedResultId.clear();
+  m_lastSyncedDetailPath.clear();
   reapplyCurrentQuery();
 }
 
@@ -2535,9 +3014,7 @@ bool LauncherPanel::ignorePointerEvent() const {
   return m_config != nullptr && m_config->config().shell.launcher.ignoreMouse;
 }
 
-bool LauncherPanel::handleGlobalKey(
-    std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit, bool /*repeat*/
-) {
+bool LauncherPanel::handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) {
   if (!pressed || preedit) {
     return false;
   }
@@ -2710,6 +3187,22 @@ void LauncherPanel::onInputChanged(const std::string& text) {
         }
       }
       sortResultsByScore(m_allResults);
+    }
+  }
+
+  std::string calcTitle;
+  for (const auto& r : m_allResults) {
+    if (r.id == "math" || r.providerId == "calculator" || r.providerId == "Calculator") {
+      calcTitle = r.title;
+      break;
+    }
+  }
+  if (m_calcPill != nullptr) {
+    const bool hasCalc = !calcTitle.empty();
+    m_calcPill->setVisible(hasCalc);
+    m_calcPill->setParticipatesInLayout(hasCalc);
+    if (hasCalc) {
+      m_calcPill->setText(calcTitle);
     }
   }
 
@@ -3365,6 +3858,9 @@ void LauncherPanel::refreshResults() {
   rebuildLauncherSections();
   m_grid->notifyDataChanged();
   if (m_results.empty()) {
+    m_inspectedResultId.clear();
+    m_detailImagePath.clear();
+    stopGifAnimation();
     m_grid->setSelectedIndex(std::nullopt);
     m_grid->scrollView().setScrollOffset(0.0F);
     if (m_launcherSections != nullptr) {
@@ -3396,7 +3892,328 @@ void LauncherPanel::selectResult(std::size_t index, bool scrollToSelection) {
   }
   if (m_grid != nullptr) {
     m_grid->setSelectedIndex(index);
+    if (scrollToSelection) {
+      m_grid->scrollToIndex(index);
+    }
   }
+  if (isFilesView() && index < m_results.size()) {
+    bindFilesInspector(m_results[index]);
+  }
+}
+
+bool LauncherPanel::isFilesView() const {
+  if (m_scopedProviderId == "files" || m_resultProviderId == "files") {
+    return true;
+  }
+  if (!m_results.empty() && std::ranges::all_of(m_results, [](const auto& r) { return r.providerId == "files"; })) {
+    return true;
+  }
+  return false;
+}
+
+void LauncherPanel::filesGoUp() {
+  m_inspectedResultId.clear();
+  m_lastSyncedDetailPath.clear();
+  stopGifAnimation();
+  for (auto& provider : m_providers) {
+    if (provider->id() == "files") {
+      auto* fp = static_cast<FilesProvider*>(provider.get());
+      if (fp->goUp()) {
+        std::string targetPrefix = !provider->prefix().empty() ? std::string(provider->prefix()) : "/files";
+        if (!targetPrefix.ends_with(' ')) {
+          targetPrefix += ' ';
+        }
+        if (m_input != nullptr) {
+          m_input->setValue(targetPrefix);
+        }
+        onInputChanged(targetPrefix);
+        if (m_grid != nullptr) {
+          m_grid->scrollView().setScrollOffset(0.0F);
+        }
+        selectResult(0, false);
+      }
+      break;
+    }
+  }
+}
+
+void LauncherPanel::reapplyQuery() {
+  m_inspectedResultId.clear();
+  m_lastSyncedDetailPath.clear();
+  stopGifAnimation();
+  const std::string currentVal = m_input != nullptr ? m_input->value() : "";
+  onInputChanged(currentVal);
+  if (m_grid != nullptr) {
+    m_grid->scrollView().setScrollOffset(0.0F);
+  }
+  selectResult(0, false);
+}
+
+void LauncherPanel::updateFilesNavHeader() {
+  if (m_filesNavHeader == nullptr || m_filesPathLabel == nullptr || m_filesUpButton == nullptr) {
+    return;
+  }
+  for (auto& provider : m_providers) {
+    if (provider->id() == "files") {
+      auto* fp = static_cast<FilesProvider*>(provider.get());
+      const bool canUp = fp->canGoUp();
+      if (!m_query.empty()) {
+        m_filesPathLabel->setText("Search Results (Global: " + std::to_string(m_results.size()) + ")");
+        m_filesUpButton->setVisible(false);
+        m_filesUpButton->setParticipatesInLayout(false);
+      } else {
+        m_filesPathLabel->setText(fp->currentDirectoryDisplay());
+        m_filesUpButton->setVisible(canUp);
+        m_filesUpButton->setParticipatesInLayout(canUp);
+      }
+      break;
+    }
+  }
+}
+
+void LauncherPanel::bindFilesInspector(const LauncherResult& result) {
+  if (m_detailScroll == nullptr) {
+    return;
+  }
+
+  if (m_inspectedResultId == result.id) {
+    return;
+  }
+  m_inspectedResultId = result.id;
+
+  const bool isParentNav = (result.id == "..");
+  if (isParentNav) {
+    if (m_detailFolderBox) {
+      m_detailFolderBox->setVisible(false);
+      m_detailFolderBox->setParticipatesInLayout(false);
+    }
+    if (m_detailImageBox) {
+      m_detailImageBox->setVisible(false);
+      m_detailImageBox->setParticipatesInLayout(false);
+    }
+    if (m_detailImage) {
+      m_detailImage->setVisible(false);
+      m_detailImage->setParticipatesInLayout(false);
+    }
+    m_detailImagePath.clear();
+    stopGifAnimation();
+    if (m_detailBinaryBox) {
+      m_detailBinaryBox->setVisible(false);
+      m_detailBinaryBox->setParticipatesInLayout(false);
+    }
+    if (m_detailSubtitle) {
+      m_detailSubtitle->setVisible(true);
+      m_detailSubtitle->setParticipatesInLayout(true);
+      m_detailSubtitle->setText("Parent Directory");
+    }
+    if (m_detailBody) {
+      m_detailBody->setVisible(true);
+      m_detailBody->setParticipatesInLayout(true);
+      m_detailBody->setText("Press Enter to navigate up to parent directory");
+    }
+    if (m_detailDivider) {
+      m_detailDivider->setVisible(false);
+      m_detailDivider->setParticipatesInLayout(false);
+    }
+    if (m_detailMetaTable) {
+      m_detailMetaTable->setVisible(false);
+      m_detailMetaTable->setParticipatesInLayout(false);
+    }
+    m_detailScroll->setScrollOffset(0.0F);
+    PanelManager::instance().requestLayout();
+    PanelManager::instance().requestRedraw();
+    PanelManager::instance().refresh();
+    return;
+  }
+
+  const auto meta = FilesProvider::getFileMetadata(result.id);
+
+  // 1. Preview upper section
+  if (meta.isDirectory) {
+    if (m_detailFolderBox) {
+      m_detailFolderBox->setVisible(true);
+      m_detailFolderBox->setParticipatesInLayout(true);
+    }
+    if (m_detailImageBox) {
+      m_detailImageBox->setVisible(false);
+      m_detailImageBox->setParticipatesInLayout(false);
+    }
+    if (m_detailImage) {
+      m_detailImage->setVisible(false);
+      m_detailImage->setParticipatesInLayout(false);
+    }
+    m_detailImagePath.clear();
+    if (m_detailBinaryBox) {
+      m_detailBinaryBox->setVisible(false);
+      m_detailBinaryBox->setParticipatesInLayout(false);
+    }
+    if (m_detailSubtitle) {
+      m_detailSubtitle->setVisible(false);
+      m_detailSubtitle->setParticipatesInLayout(false);
+    }
+    if (m_detailBody) {
+      m_detailBody->setVisible(false);
+      m_detailBody->setParticipatesInLayout(false);
+    }
+  } else if (meta.isImage) {
+    if (m_detailFolderBox) {
+      m_detailFolderBox->setVisible(false);
+      m_detailFolderBox->setParticipatesInLayout(false);
+    }
+    if (m_detailBinaryBox) {
+      m_detailBinaryBox->setVisible(false);
+      m_detailBinaryBox->setParticipatesInLayout(false);
+    }
+    if (m_detailSubtitle) {
+      m_detailSubtitle->setVisible(false);
+      m_detailSubtitle->setParticipatesInLayout(false);
+    }
+    if (m_detailBody) {
+      m_detailBody->setVisible(false);
+      m_detailBody->setParticipatesInLayout(false);
+    }
+    m_detailImagePath = meta.path;
+    if (m_detailImageBox) {
+      m_detailImageBox->setVisible(true);
+      m_detailImageBox->setParticipatesInLayout(true);
+    }
+    if (m_detailImage) {
+      m_detailImage->setVisible(true);
+      m_detailImage->setParticipatesInLayout(true);
+    }
+  } else if (meta.isText) {
+    if (m_detailFolderBox) {
+      m_detailFolderBox->setVisible(false);
+      m_detailFolderBox->setParticipatesInLayout(false);
+    }
+    if (m_detailImageBox) {
+      m_detailImageBox->setVisible(false);
+      m_detailImageBox->setParticipatesInLayout(false);
+    }
+    if (m_detailImage) {
+      m_detailImage->setVisible(false);
+      m_detailImage->setParticipatesInLayout(false);
+    }
+    m_detailImagePath.clear();
+    if (m_detailBinaryBox) {
+      m_detailBinaryBox->setVisible(false);
+      m_detailBinaryBox->setParticipatesInLayout(false);
+    }
+    if (m_detailSubtitle) {
+      m_detailSubtitle->setVisible(false);
+      m_detailSubtitle->setParticipatesInLayout(false);
+    }
+    if (m_detailBody) {
+      m_detailBody->setVisible(true);
+      m_detailBody->setParticipatesInLayout(true);
+      m_detailBody->setText(meta.textContent.empty() ? "(Empty file)" : meta.textContent);
+    }
+  } else {
+    if (m_detailFolderBox) {
+      m_detailFolderBox->setVisible(false);
+      m_detailFolderBox->setParticipatesInLayout(false);
+    }
+    if (m_detailImageBox) {
+      m_detailImageBox->setVisible(false);
+      m_detailImageBox->setParticipatesInLayout(false);
+    }
+    if (m_detailImage) {
+      m_detailImage->setVisible(false);
+      m_detailImage->setParticipatesInLayout(false);
+    }
+    m_detailImagePath.clear();
+    if (m_detailSubtitle) {
+      m_detailSubtitle->setVisible(false);
+      m_detailSubtitle->setParticipatesInLayout(false);
+    }
+    if (m_detailBody) {
+      m_detailBody->setVisible(false);
+      m_detailBody->setParticipatesInLayout(false);
+    }
+    if (m_detailBinaryBox) {
+      m_detailBinaryBox->setVisible(true);
+      m_detailBinaryBox->setParticipatesInLayout(true);
+    }
+  }
+
+  // 2. Horizontal divider
+  if (m_detailDivider) {
+    m_detailDivider->setVisible(true);
+    m_detailDivider->setParticipatesInLayout(true);
+  }
+
+  // 3. Metadata Table
+  if (m_detailMetaTable) {
+    m_detailMetaTable->setVisible(true);
+    m_detailMetaTable->setParticipatesInLayout(true);
+  }
+  if (m_metaValueName) {
+    m_metaValueName->setText(meta.name);
+  }
+  if (m_metaValueType) {
+    m_metaValueType->setText(meta.type);
+  }
+  if (m_metaValueSize) {
+    m_metaValueSize->setText(meta.size);
+  }
+  if (m_metaValuePath) {
+    m_metaValuePath->setText(meta.path);
+  }
+
+  if (meta.isDirectory) {
+    if (m_metaRowItems) {
+      m_metaRowItems->setVisible(true);
+      m_metaRowItems->setParticipatesInLayout(true);
+    }
+    if (m_metaValueItems) {
+      m_metaValueItems->setText(meta.items);
+    }
+    if (m_metaRowLines) {
+      m_metaRowLines->setVisible(false);
+      m_metaRowLines->setParticipatesInLayout(false);
+    }
+    if (m_metaRowChars) {
+      m_metaRowChars->setVisible(false);
+      m_metaRowChars->setParticipatesInLayout(false);
+    }
+  } else if (meta.isText) {
+    if (m_metaRowItems) {
+      m_metaRowItems->setVisible(false);
+      m_metaRowItems->setParticipatesInLayout(false);
+    }
+    if (m_metaRowLines) {
+      m_metaRowLines->setVisible(true);
+      m_metaRowLines->setParticipatesInLayout(true);
+    }
+    if (m_metaValueLines) {
+      m_metaValueLines->setText(meta.lines);
+    }
+    if (m_metaRowChars) {
+      m_metaRowChars->setVisible(true);
+      m_metaRowChars->setParticipatesInLayout(true);
+    }
+    if (m_metaValueChars) {
+      m_metaValueChars->setText(meta.chars);
+    }
+  } else {
+    if (m_metaRowItems) {
+      m_metaRowItems->setVisible(false);
+      m_metaRowItems->setParticipatesInLayout(false);
+    }
+    if (m_metaRowLines) {
+      m_metaRowLines->setVisible(false);
+      m_metaRowLines->setParticipatesInLayout(false);
+    }
+    if (m_metaRowChars) {
+      m_metaRowChars->setVisible(false);
+      m_metaRowChars->setParticipatesInLayout(false);
+    }
+  }
+
+  m_detailScroll->setScrollOffset(0.0F);
+  PanelManager::instance().requestLayout();
+  PanelManager::instance().requestRedraw();
+  PanelManager::instance().refresh();
 }
 
 void LauncherPanel::applyEmptyState() {
@@ -3404,18 +4221,73 @@ void LauncherPanel::applyEmptyState() {
     return;
   }
   const bool empty = m_results.empty();
+  const bool filesView = isFilesView();
   const bool detail = !empty && shouldUseDetailPresentation();
-  const bool sections = !empty && !detail && shouldUseLauncherSections();
-  m_grid->setVisible(!empty && !detail && !sections);
-  m_grid->setParticipatesInLayout(!empty && !detail && !sections);
-  if (m_launcherSections != nullptr) {
-    m_launcherSections->setVisible(sections);
-    m_launcherSections->setParticipatesInLayout(sections);
+  const bool sections = !empty && !detail && !filesView && shouldUseLauncherSections();
+
+  if (filesView) {
+    m_resultsViewport->setDirection(FlexDirection::Horizontal);
+    m_resultsViewport->setGap(Style::spaceSm * contentScale());
+    if (m_filesLeftPane != nullptr) {
+      m_filesLeftPane->setFlexGrow(4.2F);
+      m_filesLeftPane->setVisible(true);
+      m_filesLeftPane->setParticipatesInLayout(true);
+    }
+    if (m_filesNavHeader != nullptr) {
+      m_filesNavHeader->setVisible(true);
+      m_filesNavHeader->setParticipatesInLayout(true);
+      updateFilesNavHeader();
+    }
+    if (m_filesCenterDivider != nullptr) {
+      m_filesCenterDivider->setVisible(true);
+      m_filesCenterDivider->setParticipatesInLayout(true);
+    }
+    m_grid->setVisible(!empty);
+    m_grid->setParticipatesInLayout(!empty);
+    if (m_launcherSections != nullptr) {
+      m_launcherSections->setVisible(false);
+      m_launcherSections->setParticipatesInLayout(false);
+    }
+    if (m_detailScroll != nullptr) {
+      m_detailScroll->setFlexGrow(5.8F);
+      m_detailScroll->setVisible(!empty);
+      m_detailScroll->setParticipatesInLayout(!empty);
+    }
+    if (!empty && m_selectedIndex < m_results.size()) {
+      bindFilesInspector(m_results[m_selectedIndex]);
+    }
+  } else {
+    m_resultsViewport->setDirection(FlexDirection::Vertical);
+    m_resultsViewport->setGap(0.0F);
+    if (m_filesNavHeader != nullptr) {
+      m_filesNavHeader->setVisible(false);
+      m_filesNavHeader->setParticipatesInLayout(false);
+    }
+    if (m_filesLeftPane != nullptr) {
+      m_filesLeftPane->setFlexGrow(1.0F);
+      m_filesLeftPane->setVisible(true);
+      m_filesLeftPane->setParticipatesInLayout(true);
+    }
+    if (m_filesCenterDivider != nullptr) {
+      m_filesCenterDivider->setVisible(false);
+      m_filesCenterDivider->setParticipatesInLayout(false);
+    }
+    m_grid->setVisible(!empty && !detail && !sections);
+    m_grid->setParticipatesInLayout(!empty && !detail && !sections);
+    if (m_launcherSections != nullptr) {
+      m_launcherSections->setVisible(sections);
+      m_launcherSections->setParticipatesInLayout(sections);
+    }
+    if (m_detailScroll != nullptr) {
+      m_detailScroll->setFlexGrow(1.0F);
+      m_detailScroll->setVisible(detail);
+      m_detailScroll->setParticipatesInLayout(detail);
+    }
+    if (detail) {
+      bindDetailResult();
+    }
   }
-  if (m_detailScroll != nullptr) {
-    m_detailScroll->setVisible(detail);
-    m_detailScroll->setParticipatesInLayout(detail);
-  }
+
   m_emptyLabel->setVisible(empty);
   m_emptyLabel->setParticipatesInLayout(empty);
   if (empty) {
@@ -3434,6 +4306,13 @@ bool LauncherPanel::shouldUseDetailPresentation() const {
 }
 
 void LauncherPanel::bindDetailResult() {
+  if (isFilesView()) {
+    if (!m_results.empty() && m_selectedIndex < m_results.size()) {
+      bindFilesInspector(m_results[m_selectedIndex]);
+    }
+    return;
+  }
+
   if (!shouldUseDetailPresentation()
       || m_detailScroll == nullptr
       || m_detailSubtitle == nullptr
@@ -3442,12 +4321,42 @@ void LauncherPanel::bindDetailResult() {
   }
 
   const LauncherResult& result = m_results.front();
+  if (m_inspectedResultId == result.id) {
+    return;
+  }
+  m_inspectedResultId = result.id;
+
   const bool hasSubtitle = !result.subtitle.empty();
   m_detailSubtitle->setVisible(hasSubtitle);
   m_detailSubtitle->setParticipatesInLayout(hasSubtitle);
   m_detailSubtitle->setText(singleLinePreview(result.subtitle));
   m_detailBody->setText(result.title.empty() ? result.id : result.title);
+
+  const bool isImage = !result.iconPath.empty()
+      && (endsWithIgnoreCase(result.iconPath, ".png")
+          || endsWithIgnoreCase(result.iconPath, ".jpg")
+          || endsWithIgnoreCase(result.iconPath, ".jpeg")
+          || endsWithIgnoreCase(result.iconPath, ".webp")
+          || endsWithIgnoreCase(result.iconPath, ".svg")
+          || endsWithIgnoreCase(result.iconPath, ".gif")
+          || endsWithIgnoreCase(result.iconPath, ".bmp"));
+  m_detailImagePath = isImage ? result.iconPath : std::string{};
+  if (!isImage) {
+    stopGifAnimation();
+  }
+  if (m_detailImageBox) {
+    m_detailImageBox->setVisible(isImage);
+    m_detailImageBox->setParticipatesInLayout(isImage);
+  }
+  if (m_detailImage) {
+    m_detailImage->setVisible(isImage);
+    m_detailImage->setParticipatesInLayout(isImage);
+  }
+
   m_detailScroll->setScrollOffset(0.0F);
+  PanelManager::instance().requestLayout();
+  PanelManager::instance().requestRedraw();
+  PanelManager::instance().refresh();
 }
 
 bool LauncherPanel::openAppActionsMenu(std::size_t index, float anchorX, float anchorY) {
@@ -3455,6 +4364,13 @@ bool LauncherPanel::openAppActionsMenu(std::size_t index, float anchorX, float a
     return false;
   }
   const LauncherResult& base = m_results[index];
+
+  if (base.providerId == "files") {
+    return openFileActionsMenu(base, anchorX, anchorY);
+  }
+  if (base.providerId == "services") {
+    return openServiceActionsMenu(base, anchorX, anchorY);
+  }
 
   const DesktopEntry* match = nullptr;
   for (const auto& e : desktopEntries()) {
@@ -3628,6 +4544,245 @@ bool LauncherPanel::openAppActionsMenu(std::size_t index, float anchorX, float a
   return true;
 }
 
+bool LauncherPanel::openFileActionsMenu(const LauncherResult& base, float anchorX, float anchorY) {
+  WaylandConnection* wl = PanelManager::instance().wayland();
+  RenderContext* rc = PanelManager::instance().renderContext();
+  if (wl == nullptr || rc == nullptr) {
+    return false;
+  }
+
+  const auto parentCtx = PanelManager::instance().fallbackPopupParentContext();
+  if (!parentCtx.has_value()) {
+    return false;
+  }
+
+  if (m_actionsMenu == nullptr) {
+    m_actionsMenu = std::make_unique<ContextMenuPopup>(*wl, *rc);
+  }
+
+  const std::string filePath = base.id;
+
+  constexpr std::int32_t kActionOpen = 1;
+  constexpr std::int32_t kActionOpenFolder = 2;
+  constexpr std::int32_t kActionCopyPath = 3;
+  constexpr std::int32_t kActionCopyContent = 4;
+
+  std::vector<ContextMenuControlEntry> entries;
+  entries.push_back({.id = kActionOpen, .label = i18n::tr("launcher.context-menu.open"), .enabled = true});
+  entries.push_back({.id = kActionOpenFolder, .label = "Open Containing Folder", .enabled = true});
+  entries.push_back({.id = kActionCopyPath, .label = "Copy Path", .enabled = true});
+  entries.push_back({.id = kActionCopyContent, .label = "Copy Content", .enabled = true});
+
+  const float scale = contentScale();
+  constexpr float kMenuWidth = 240.0F;
+  const float minMenuWidth = kMenuWidth * scale;
+
+  if (m_config != nullptr) {
+    m_actionsMenu->setShadowConfig(m_config->config().shell.shadow);
+  }
+  PanelManager::instance().beginAttachedPopup(parentCtx->surface);
+  PanelManager::instance().setActivePopup(m_actionsMenu.get());
+
+  m_actionsMenu->setOnDismissed([parentSurface = parentCtx->surface] {
+    PanelManager::instance().clearActivePopup();
+    PanelManager::instance().endAttachedPopup(parentSurface);
+  });
+
+  m_actionsMenu->setOnActivate([this, base, filePath](const ContextMenuControlEntry& entry) {
+    for (auto& provider : m_providers) {
+      if (provider->id() == "files") {
+        auto* fp = dynamic_cast<FilesProvider*>(provider.get());
+        if (fp != nullptr) {
+          switch (entry.id) {
+          case kActionOpen:
+            fp->activate(base);
+            finishActivation(*fp, base.id, false, false);
+            break;
+          case kActionOpenFolder:
+            fp->openContainingFolder(filePath);
+            finishActivation(*fp, base.id, false, false);
+            break;
+          case kActionCopyPath:
+            fp->copyPath(filePath);
+            finishActivation(*fp, base.id, true, false);
+            break;
+          case kActionCopyContent:
+            fp->copyFileContents(filePath);
+            finishActivation(*fp, base.id, true, false);
+            break;
+          default:
+            break;
+          }
+        }
+        break;
+      }
+    }
+  });
+
+  const float inset = std::round(std::max(4.0F, Style::spaceXs * scale));
+  const auto ax = static_cast<std::int32_t>(std::round(anchorX - inset));
+  const auto ay = static_cast<std::int32_t>(std::round(anchorY - inset));
+  const auto aw = static_cast<std::int32_t>(std::round(inset * 2.0F));
+  const auto ah = static_cast<std::int32_t>(std::round(inset * 2.0F));
+
+  m_actionsMenu->open(
+      ContextMenuPopupRequest{
+          .entries = std::move(entries),
+          .minMenuWidth = minMenuWidth,
+          .maxMenuWidth = Style::menuAutoMaxWidth * scale,
+          .maxVisible = 12,
+          .anchor =
+              PopupAnchorRect{
+                  .x = ax,
+                  .y = ay,
+                  .width = std::max(1, aw),
+                  .height = std::max(1, ah),
+              },
+          .parent = PopupSurfaceParent{
+              .attach = parentCtx->attach,
+              .output = parentCtx->output,
+          },
+      }
+  );
+  return true;
+}
+
+bool LauncherPanel::openServiceActionsMenu(const LauncherResult& base, float anchorX, float anchorY) {
+  WaylandConnection* wl = PanelManager::instance().wayland();
+  RenderContext* rc = PanelManager::instance().renderContext();
+  if (wl == nullptr || rc == nullptr) {
+    return false;
+  }
+
+  const auto parentCtx = PanelManager::instance().fallbackPopupParentContext();
+  if (!parentCtx.has_value()) {
+    return false;
+  }
+
+  if (m_actionsMenu == nullptr) {
+    m_actionsMenu = std::make_unique<ContextMenuPopup>(*wl, *rc);
+  }
+
+  std::string_view rest = base.id;
+  bool isUser = false;
+  if (rest.starts_with("user:")) {
+    isUser = true;
+    rest = rest.substr(5);
+  } else if (rest.starts_with("system:")) {
+    rest = rest.substr(7);
+  }
+  const std::string unitName{rest};
+
+  constexpr std::int32_t kActionStart = 1;
+  constexpr std::int32_t kActionStop = 2;
+  constexpr std::int32_t kActionRestart = 3;
+  constexpr std::int32_t kActionEnable = 4;
+  constexpr std::int32_t kActionDisable = 5;
+  constexpr std::int32_t kActionCopyName = 6;
+
+  std::vector<ContextMenuControlEntry> entries;
+  entries.push_back({.id = kActionStart, .label = "Start Service", .enabled = true});
+  entries.push_back({.id = kActionStop, .label = "Stop Service", .enabled = true});
+  entries.push_back({.id = kActionRestart, .label = "Restart Service", .enabled = true});
+  entries.push_back({.id = kActionEnable, .label = "Enable Service", .enabled = true});
+  entries.push_back({.id = kActionDisable, .label = "Disable Service", .enabled = true});
+  entries.push_back({.id = kActionCopyName, .label = "Copy Unit Name", .enabled = true});
+
+  const float scale = contentScale();
+  constexpr float kMenuWidth = 240.0F;
+  const float minMenuWidth = kMenuWidth * scale;
+
+  if (m_config != nullptr) {
+    m_actionsMenu->setShadowConfig(m_config->config().shell.shadow);
+  }
+  PanelManager::instance().beginAttachedPopup(parentCtx->surface);
+  PanelManager::instance().setActivePopup(m_actionsMenu.get());
+
+  m_actionsMenu->setOnDismissed([parentSurface = parentCtx->surface] {
+    PanelManager::instance().clearActivePopup();
+    PanelManager::instance().endAttachedPopup(parentSurface);
+  });
+
+  m_actionsMenu->setOnActivate([this, unitName, isUser](const ContextMenuControlEntry& entry) {
+    for (auto& provider : m_providers) {
+      if (provider->id() == "services") {
+        auto* sp = dynamic_cast<ServicesProvider*>(provider.get());
+        if (sp != nullptr) {
+          switch (entry.id) {
+          case kActionStart:
+            sp->startService(unitName, isUser);
+            break;
+          case kActionStop:
+            sp->stopService(unitName, isUser);
+            break;
+          case kActionRestart:
+            sp->restartService(unitName, isUser);
+            break;
+          case kActionEnable:
+            sp->enableService(unitName, isUser);
+            break;
+          case kActionDisable:
+            sp->disableService(unitName, isUser);
+            break;
+          case kActionCopyName:
+            sp->copyUnitName(unitName);
+            break;
+          default:
+            break;
+          }
+          reapplyCurrentQuery();
+        }
+        break;
+      }
+    }
+  });
+
+  const float inset = std::round(std::max(4.0F, Style::spaceXs * scale));
+  const auto ax = static_cast<std::int32_t>(std::round(anchorX - inset));
+  const auto ay = static_cast<std::int32_t>(std::round(anchorY - inset));
+  const auto aw = static_cast<std::int32_t>(std::round(inset * 2.0F));
+  const auto ah = static_cast<std::int32_t>(std::round(inset * 2.0F));
+
+  m_actionsMenu->open(
+      ContextMenuPopupRequest{
+          .entries = std::move(entries),
+          .minMenuWidth = minMenuWidth,
+          .maxMenuWidth = Style::menuAutoMaxWidth * scale,
+          .maxVisible = 12,
+          .anchor =
+              PopupAnchorRect{
+                  .x = ax,
+                  .y = ay,
+                  .width = std::max(1, aw),
+                  .height = std::max(1, ah),
+              },
+          .parent = PopupSurfaceParent{
+              .attach = parentCtx->attach,
+              .output = parentCtx->output,
+          },
+      }
+  );
+  return true;
+}
+
+void LauncherPanel::activateCalculatorResult() {
+  if (m_calcPill == nullptr || !m_calcPill->visible()) {
+    return;
+  }
+  for (const auto& r : m_results) {
+    if (r.providerId == "math") {
+      for (auto& provider : m_providers) {
+        if (provider->id() == "math") {
+          if (provider->activate(r)) {
+            finishActivation(*provider, r.id, true, false);
+          }
+          return;
+        }
+      }
+    }
+  }
+}
+
 void LauncherPanel::activateAt(std::size_t index) {
   if (index >= m_results.size()) {
     return;
@@ -3665,6 +4820,20 @@ void LauncherPanel::activateSelected() {
     }
 
     if (!provider->activate(result)) {
+      if (provider->id() == "files") {
+        std::string targetPrefix = !provider->prefix().empty() ? std::string(provider->prefix()) : "/files";
+        if (!targetPrefix.ends_with(' ')) {
+          targetPrefix += ' ';
+        }
+        if (m_input != nullptr) {
+          m_input->setValue(targetPrefix);
+        }
+        onInputChanged(targetPrefix);
+        if (m_grid != nullptr) {
+          m_grid->scrollView().setScrollOffset(0.0F);
+        }
+        selectResult(0, false);
+      }
       return;
     }
 

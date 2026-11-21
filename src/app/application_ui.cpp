@@ -15,9 +15,11 @@
 #include "launcher/app_provider.h"
 #include "launcher/dmenu_provider.h"
 #include "launcher/emoji_provider.h"
+#include "launcher/files_provider.h"
 #include "launcher/math_provider.h"
 #include "launcher/panel_provider.h"
 #include "launcher/plugin_launcher_provider.h"
+#include "launcher/services_provider.h"
 #include "launcher/session_provider.h"
 #include "launcher/wallpaper_provider.h"
 #include "launcher/window_provider.h"
@@ -105,7 +107,6 @@ void Application::initUi() {
 void Application::initUiRenderSurfacesAndSettings() {
 
   m_renderContext.initialize(m_glShared);
-  m_renderContext.setAsyncTextureCache(&m_asyncTextureCache);
   m_glShared.setGraphicsResetCallback([this](RenderGraphicsResetStatus status) { onGraphicsReset(status); });
   if (!m_glShared.hasSharedContext()) {
     m_asyncTextureCache.setMakeCurrentCallback([this] { m_renderContext.backend().makeCurrentNoSurface(); });
@@ -300,13 +301,11 @@ void Application::scheduleGreeterAutoSync() {
 bool Application::syncShellFont() {
   text::refreshSystemFont();
   std::string family = text::resolveFontFamily(m_configService.config().shell.fontFamily);
-  const float scale = m_configService.config().accessibility.fontScale;
-  // Only the settings window follows the system font size, like other desktop apps; it rebuilds itself.
-  m_settingsWindow.setTextScale(scale * text::currentSystemFont().textScale(Style::fontSizeBody));
+  const float scale = text::currentSystemFont().textScale(Style::fontSizeBody);
   if (family == m_appliedFontFamily && scale == m_appliedTextScale) {
     return false;
   }
-  kLog.info("shell font: family='{}' text scale {:.2f}", family, scale);
+  kLog.info("shell font: family='{}' text scale {:.3f}", family, scale);
   m_renderContext.setTextFontFamily(family);
   m_renderContext.setTextScale(scale);
   m_appliedFontFamily = std::move(family);
@@ -563,11 +562,6 @@ void Application::initInputDispatch() {
       return;
     }
   });
-  m_wayland.setKeyboardFocusCallback([this](wl_surface* surface, bool entered) {
-    if (!entered) {
-      m_panelManager.onKeyboardFocusLost(surface);
-    }
-  });
 }
 
 void Application::initPanelManagerAndPanels() {
@@ -675,6 +669,7 @@ void Application::initPanelManagerAndPanels() {
       .clipboard = &m_clipboardService,
       .accounts = m_accountsService.get(),
       .thumbnails = &m_thumbnailService,
+      .asyncTextures = &m_asyncTextureCache,
   });
   ControlCenterPanel* controlCenterPanelPtr = controlCenterPanel.get();
   m_panelManager.registerPanel("control-center", std::move(controlCenterPanel));
@@ -690,6 +685,8 @@ void Application::initPanelManagerAndPanels() {
     launcherPanel->addProvider(std::make_unique<SessionProvider>(&m_configService, &m_sessionActionRunner));
     launcherPanel->addProvider(std::make_unique<MathProvider>(&m_clipboardService, &m_configService, &m_httpClient));
     launcherPanel->addProvider(std::make_unique<EmojiProvider>(&m_clipboardService));
+    launcherPanel->addProvider(std::make_unique<FilesProvider>(&m_configService, &m_clipboardService));
+    launcherPanel->addProvider(std::make_unique<ServicesProvider>(m_systemBus.get(), m_bus.get(), &m_clipboardService));
     launcherPanel->setCopiedActivationCallback([this] {
       const ClipboardAutoPasteMode mode = m_configService.config().shell.launcher.autoPaste;
       if (mode == ClipboardAutoPasteMode::Off) {
@@ -819,7 +816,9 @@ void Application::initNotificationAndOsd() {
 
   TooltipManager::instance().initialize(m_wayland, &m_configService, &m_renderContext);
   m_osdOverlay.initialize(m_wayland, m_compositorPlatform, &m_configService, &m_renderContext);
-  m_windowSwitcher.initialize(m_wayland, &m_renderContext, m_compositorPlatform, &m_configService);
+  m_windowSwitcher.initialize(
+      m_wayland, &m_renderContext, m_compositorPlatform, &m_configService, &m_asyncTextureCache
+  );
   m_configService.addReloadCallback([this] { m_windowSwitcher.onConfigReload(); });
   m_configService.addReloadCallback([this] { m_osdOverlay.onConfigReload(); });
   m_scriptApi.setShowOsdHook(

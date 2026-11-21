@@ -46,8 +46,6 @@ struct PluginPanelOptions {
   bool persistent = false;
   // Key chord specs the panel takes over while focused, verbatim from the manifest.
   std::vector<std::string> captureKeys;
-  // Manifest API level, used to keep the onKey contract stable for older plugins.
-  std::uint32_t pluginApiVersion = 0;
   scripting::PluginPanelShellConfig shellConfig;
 };
 
@@ -64,7 +62,6 @@ public:
   void create() override;
   void onOpen(std::string_view context) override;
   void onClose() override;
-  void onKeyboardFocusLost() override;
   void onFrameTick(float deltaMs, Renderer& renderer) override;
   void scrollFocusedInputIntoView(InputArea* area) override;
   bool isContextActive(std::string_view context) const override;
@@ -87,11 +84,10 @@ public:
   [[nodiscard]] InputArea* takePendingFocusArea() override { return std::exchange(m_pendingFocusArea, nullptr); }
   bool dismissTransientUi() override;
 
-  // Delivers a manifest-declared capture_keys chord to the script's onKey(chord, pressed, repeated)
-  // and reports it consumed. Declared chords only: everything else keeps its host behavior, and a
+  // Delivers a manifest-declared capture_keys chord to the script's onKey(chord, pressed) and
+  // reports it consumed. Declared chords only: everything else keeps its host behavior, and a
   // focused text input still wins printable keys (PanelManager reserves those before calling).
-  // Repeats are delivered only to plugins declaring the matching API level.
-  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit, bool repeat) override;
+  bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
 
   // PluginIpcEndpoint
   std::string_view ipcEntryId() const override { return m_entryId; }
@@ -109,7 +105,7 @@ private:
   void closeContextMenu();
   scripting::ScriptSnapshot makeScriptSnapshot() const;
   std::string resolvePluginPath(const std::string& path) const;
-  void releaseCapturedKeys(bool notifyScript = false);
+  void releaseCapturedKeys();
   void startScript();
   void startTickTimer();
   void setupScriptWatch();
@@ -125,7 +121,8 @@ private:
   struct CaptureKey {
     KeyChord chord;
     std::string spec;
-    // Physically down, so a repeat can be distinguished from the initial press.
+    // Physically down. Key repeat re-sends press events, which a hold-to-act interaction must
+    // not see as new presses, so a repeat is consumed without a second onKey call.
     bool held = false;
   };
   std::vector<CaptureKey> m_captureKeys;
@@ -163,6 +160,5 @@ private:
   LayerShellLayer m_layer = LayerShellLayer::Top;
   bool m_persistent = false;
   scripting::PluginPanelShellConfig m_shellConfig;
-  std::uint32_t m_pluginApiVersion = 0;
   std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
 };

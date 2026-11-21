@@ -714,15 +714,22 @@ void MarkdownView::loadImage(ImageEntry& entry, const std::string& path) {
   }
   Renderer& renderer = *m_imageSource.renderer;
   const int targetSize = static_cast<int>(std::ceil(kImageTargetSize * m_scale));
-  // The image is a child of this view, so the callback cannot outlive it.
-  entry.image->setAsyncReadyCallback([this, image = entry.image, row = entry.row] {
-    row->setVisible(image->loadState() == ImageLoadState::Ready);
-    markLayoutDirty();
-    if (m_imageSource.onLayoutNeeded) {
-      m_imageSource.onLayoutNeeded();
+  bool loaded = false;
+  if (m_imageSource.textureCache != nullptr) {
+    loaded = entry.image->setSourceFileAsync(renderer, *m_imageSource.textureCache, path, targetSize, true);
+    if (!loaded) {
+      // The image is a child of this view, so the callback cannot outlive it.
+      entry.image->setAsyncReadyCallback([this, row = entry.row] {
+        row->setVisible(true);
+        markLayoutDirty();
+        if (m_imageSource.onLayoutNeeded) {
+          m_imageSource.onLayoutNeeded();
+        }
+      });
     }
-  });
-  const bool loaded = entry.image->setSourceFile(renderer, path, {.targetSize = targetSize, .mipmap = true});
+  } else {
+    loaded = entry.image->setSourceFile(renderer, path, targetSize, true);
+  }
   entry.row->setVisible(loaded);
 }
 

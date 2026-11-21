@@ -296,6 +296,10 @@ void VirtualGridView::setOnSelectionChanged(std::function<void(std::optional<std
   m_onSelectionChanged = std::move(callback);
 }
 
+void VirtualGridView::setOnHoverChanged(std::function<void(std::optional<std::size_t>)> callback) {
+  m_onHoverChanged = std::move(callback);
+}
+
 std::size_t VirtualGridView::pageItemStride() const noexcept {
   if (m_scroll == nullptr || m_layoutColumns == 0 || m_cellHeightResolved <= 0.0F) {
     return 1;
@@ -489,10 +493,17 @@ void VirtualGridView::doLayout(Renderer& renderer) {
         return {};
       }
       const std::size_t index = *m_slotBoundIndex[slot];
-      std::string tooltip = m_slotBoundOverlayHovered[slot] ? m_adapter->overlayTooltip(index) : std::string{};
-      if (tooltip.empty()) {
-        tooltip = m_adapter->itemTooltip(index);
+      if (m_slotBoundOverlayHovered[slot]) {
+        std::string overlay = m_adapter->overlayTooltip(index);
+        if (!overlay.empty()) {
+          return TooltipContent{std::move(overlay)};
+        }
       }
+      TooltipContent content = m_adapter->itemTooltipContent(index);
+      if (!std::holds_alternative<std::monostate>(content)) {
+        return content;
+      }
+      std::string tooltip = m_adapter->itemTooltip(index);
       return tooltip.empty() ? TooltipContent{} : TooltipContent{std::move(tooltip)};
     });
     m_poolTooltipAreas.push_back(static_cast<InputArea*>(m_inputArea->addChild(std::move(tooltipArea))));
@@ -690,6 +701,9 @@ void VirtualGridView::onPointerMotion(float localX, float localY) {
 
   m_hoveredIndex = idx;
   m_hoveredOverlayIndex = overlayIdx;
+  if (m_onHoverChanged) {
+    m_onHoverChanged(m_hoveredIndex);
+  }
   markLayoutDirty();
 }
 
@@ -703,6 +717,9 @@ void VirtualGridView::onPointerLeave() {
   }
   m_hoveredIndex.reset();
   m_hoveredOverlayIndex.reset();
+  if (m_onHoverChanged) {
+    m_onHoverChanged(std::nullopt);
+  }
   markLayoutDirty();
 }
 
