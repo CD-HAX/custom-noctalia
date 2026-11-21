@@ -211,8 +211,15 @@ namespace {
       _exit(1);
     }
 
-    ::execvp(argv[0], argv);
-    std::perror("execvp");
+    std::array<char, 4096> exeBuf{};
+    const ssize_t n = ::readlink("/proc/self/exe", exeBuf.data(), exeBuf.size() - 1);
+    if (n > 0 && static_cast<std::size_t>(n) < exeBuf.size() - 1) {
+      exeBuf[static_cast<std::size_t>(n)] = '\0';
+      ::execv(exeBuf.data(), argv);
+    } else {
+      ::execvp(argv[0], argv);
+    }
+    std::perror("execv");
     const int daemonResult = 1;
     writeAll(pipeFds[1], &daemonResult, sizeof(daemonResult));
     closeFd(pipeFds[1]);
