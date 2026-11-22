@@ -107,8 +107,22 @@ namespace scripting::plugin_git {
       );
     }
 
-    bool hasOrigin(const std::filesystem::path& dest) {
-      return run({"git", "-C", dest.string(), "config", "--get", "remote.origin.url"}, kLocalTimeout, kProgressCap).ok;
+    std::string originUrl(const std::filesystem::path& dest) {
+      auto r = run({"git", "-C", dest.string(), "config", "--get", "remote.origin.url"}, kLocalTimeout, kProgressCap);
+      return trimTrailingNewline(std::move(r.out));
+    }
+
+    bool hasOrigin(const std::filesystem::path& dest) { return !originUrl(dest).empty(); }
+
+    void removeStaleLocks(const std::filesystem::path& dest) {
+      std::error_code ec;
+      for (const auto* lockName : {"config.lock", "index.lock", "shallow.lock", "HEAD.lock"}) {
+        const auto lockPath = dest / ".git" / lockName;
+        if (std::filesystem::exists(lockPath, ec)) {
+          kLog.warn("removing stale git lock '{}'", lockPath.string());
+          std::filesystem::remove(lockPath, ec);
+        }
+      }
     }
 
     GitResult failure(std::string message) {
@@ -166,10 +180,15 @@ namespace scripting::plugin_git {
   GitResult ensureRepo(const std::filesystem::path& dest, std::string_view sourceLocation) {
     std::error_code ec;
     const bool checkedOut = std::filesystem::exists(dest / ".git", ec);
-    if (checkedOut && hasOrigin(dest)) {
-      return setOrigin(dest, sourceLocation);
-    }
     if (checkedOut) {
+      removeStaleLocks(dest);
+      const std::string existingOrigin = originUrl(dest);
+      if (!existingOrigin.empty()) {
+        if (existingOrigin == sourceLocation) {
+          return GitResult{.ok = true, .exitCode = 0, .out = {}, .err = {}, .timedOut = false};
+        }
+        return setOrigin(dest, sourceLocation);
+      }
       // No `origin`: the clone that created this cache named its remote something else.
       // Nothing in the cache can fetch, so discard it and clone canonically.
       kLog.info("source cache {} has no 'origin' remote; re-cloning", dest.string());
